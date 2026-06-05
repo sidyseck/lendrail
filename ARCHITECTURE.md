@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Version | v0.1 |
+| Version | v0.2 |
 | Date | June 2026 |
 | Status | Reference architecture for MVP build |
 | Author | Technical lead |
@@ -18,18 +18,20 @@ LendRail is a post-trade data rail for agency lending. A Supplier (BTC holder) c
 
 ## 2. Tech Stack Recommendation
 
-| Layer | Choice | Justification |
-|---|---|---|
-| **Frontend** | React + TypeScript + Vite | De-facto standard; strong typing catches data-model mismatches early; Vite for fast dev loop. No Next.js — server-side rendering adds ops complexity not needed for a logged-in B2B app. |
-| **UI components** | shadcn/ui (Tailwind-based) | Unstyled-but-polished primitives; easy to theme; avoids vendor lock-in of a full design system. |
-| **Backend** | Python 3.12 + FastAPI | Async-first, auto-generated OpenAPI docs, excellent Pydantic integration for request/response validation. Python is strong for the numeric work (accrual calculations, LTV). Lean team can move fast. |
-| **ORM** | SQLAlchemy 2.x (async) + Alembic migrations | Battle-tested; async sessions pair well with FastAPI; Alembic keeps schema changes auditable. |
-| **Database** | PostgreSQL 16 | Relational joins are the right fit for this domain (loans reference agreements reference connections reference entities). JSONB for flexible fee-tier structures. Hosted on Supabase (managed Postgres) to eliminate ops burden. |
-| **Auth** | Supabase Auth (JWT, email/password + magic link) | Free-tier, managed, handles email verification and session refresh. JWTs carry `role` and `org_id` claims consumed by the API. Avoids building auth from scratch. |
-| **Background jobs** | ARQ (async task queue backed by Redis) | Lightweight async job runner that fits the FastAPI stack. Handles daily accrual sweeps and LTV refresh cycles. No Celery complexity for MVP job volume. |
-| **Notification delivery** | Resend (transactional email) | Simple HTTP API, good deliverability, generous free tier. In-app notifications stored as DB rows and polled/streamed. SMS/push deferred. |
-| **Secret storage** | Supabase Vault (AES-256 at rest) | Custodian API keys must never appear in application logs or environment variables. Vault provides a managed encrypted store with access-log audit trail. |
-| **Infrastructure** | Railway.app (backend + Redis) + Supabase (Postgres + auth + vault) + Vercel (frontend) | All three have generous free/hobby tiers and trivial deploy pipelines. Right-sized for MVP; all are escapable later. |
+The stack is chosen to run entirely on `docker compose up` locally, with each component swappable to a managed cloud equivalent when the time comes to productionalize. No accounts, no cloud spend, no external dependencies to run locally.
+
+| Layer | Local (now) | Production path | Justification |
+|---|---|---|---|
+| **Frontend** | React + TypeScript + Vite (`localhost:5173`) | Vercel / Cloudflare Pages | De-facto standard; strong typing catches data-model mismatches early; Vite for fast dev loop. No Next.js — SSR adds ops complexity not needed for a logged-in B2B app. |
+| **UI components** | shadcn/ui (Tailwind-based) | Same | Unstyled-but-polished primitives; easy to theme; no vendor lock-in. |
+| **Backend** | Python 3.12 + FastAPI (`localhost:8000`) | Railway / Fly.io / any container host | Async-first, auto-generated OpenAPI docs, strong Pydantic validation. Python is the right fit for accrual math and LTV calculations. |
+| **ORM** | SQLAlchemy 2.x (async) + Alembic | Same | Battle-tested; Alembic migrations run identically local and prod. |
+| **Database** | PostgreSQL 16 in Docker | Neon / Supabase managed Postgres | Same Postgres — only the connection string changes. Alembic migrations are the promotion artifact. |
+| **Auth** | Custom JWT (python-jose) with local user table | Swap to Supabase Auth or Auth0 — same JWT shape | Avoids any external service dependency for local dev. JWT carries `role` and `org_id` claims. Auth layer is isolated behind a `get_current_user` dependency — swapping the issuer is a one-file change. |
+| **Background jobs** | ARQ + Redis in Docker | Same ARQ, managed Redis (Upstash / Redis Cloud) | Lightweight async runner; fits the FastAPI event loop; no Celery overhead. |
+| **Notifications** | Log-to-console + in-app DB rows locally | Resend for transactional email in prod | Notification service has an interface; local implementation just logs. Swap to Resend adapter before first real user. |
+| **Secret storage** | `.env` file + AES-256 encrypted column in Postgres locally | HashiCorp Vault / AWS Secrets Manager / Supabase Vault | `SecretStore` interface is injected. Local impl reads from env. Prod impl reads from vault. Custodian keys never appear in logs in either case. |
+| **Local orchestration** | Docker Compose (postgres, redis, api, worker, frontend) | — | Single `docker compose up` starts the full stack. |
 
 ---
 
@@ -37,12 +39,12 @@ LendRail is a post-trade data rail for agency lending. A Supplier (BTC holder) c
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        React SPA (Vercel)                       │
+│              React SPA  (local: localhost:5173)                  │
 │  Supplier UI │ Agent UI │ Admin UI │ Shared components          │
 └───────────────────────────┬─────────────────────────────────────┘
-                            │ HTTPS / REST + JWT
+                            │ HTTP / REST + JWT
 ┌───────────────────────────▼─────────────────────────────────────┐
-│                   FastAPI Application (Railway)                  │
+│            FastAPI Application  (local: localhost:8000)          │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  API Layer  (routers, request/response models, auth deps) │   │
@@ -62,18 +64,18 @@ LendRail is a post-trade data rail for agency lending. A Supplier (BTC holder) c
 │  └──────┬──────────┘          │  MarketDataAdapter (iface)   │  │
 │         │                     │  ├─ MockMarketDataAdapter    │  │
 │  ┌──────▼──────────┐          │  └─ (real feed TBD)          │  │
-│  │  PostgreSQL     │          └──────────────────────────────┘  │
-│  │  (Supabase)     │                                             │
+│  │  PostgreSQL 16  │          └──────────────────────────────┘  │
+│  │  (Docker local) │                                             │
 │  └─────────────────┘                                             │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │  Background Workers (ARQ + Redis)                          │  │
+│  │  Background Workers (ARQ + Redis in Docker)                │  │
 │  │  DailyAccrualWorker │ LTVRefreshWorker │ AlertWorker       │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │  Notification Layer                                        │  │
-│  │  NotificationService → email (Resend) + in-app DB rows    │  │
+│  │  NotificationService → console log (local) / email (prod) │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -325,20 +327,108 @@ class MockCustodianAdapter:
 ```python
 # main.py (simplified)
 
+import os
 from adapters.mock_custodian import MockCustodianAdapter
 from adapters.mock_market_data import MockMarketDataAdapter
-
-import os
 
 def get_custodian_adapter() -> CustodianAdapter:
     if os.getenv("CUSTODIAN_ADAPTER", "mock") == "mock":
         return MockCustodianAdapter()
+    # Production: uncomment and wire the real adapter
     # from adapters.anchorage import AnchorageCustodianAdapter
-    # return AnchorageCustodianAdapter(api_key=vault.get("anchorage_key"))
+    # return AnchorageCustodianAdapter(api_key=secret_store.get("anchorage_key"))
     raise NotImplementedError("Real custodian adapter not wired yet")
 
 app.dependency_overrides[CustodianAdapter] = get_custodian_adapter
 ```
+
+---
+
+## 5b. Local Development Setup
+
+### Docker Compose stack
+
+All services run locally via a single `docker compose up`. No cloud accounts required.
+
+```yaml
+# docker-compose.yml (top-level layout)
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: lendrail
+      POSTGRES_USER: lendrail
+      POSTGRES_PASSWORD: lendrail
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  api:
+    build: ./backend
+    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+    env_file: .env.local
+    ports: ["8000:8000"]
+    depends_on: [postgres, redis]
+
+  worker:
+    build: ./backend
+    command: python -m arq app.workers.WorkerSettings
+    env_file: .env.local
+    depends_on: [postgres, redis]
+
+  frontend:
+    build: ./frontend
+    command: npm run dev -- --host
+    ports: ["5173:5173"]
+    depends_on: [api]
+
+volumes:
+  pgdata:
+```
+
+### Environment variables (`.env.local`)
+
+```bash
+# Database
+DATABASE_URL=postgresql+asyncpg://lendrail:lendrail@postgres:5432/lendrail
+
+# Redis
+REDIS_URL=redis://redis:6379
+
+# Auth — local JWT signing key (any random string for local dev)
+JWT_SECRET=local-dev-secret-change-in-prod
+JWT_ALGORITHM=HS256
+
+# Adapter selection — "mock" for local, real provider name for prod
+CUSTODIAN_ADAPTER=mock
+MARKET_DATA_ADAPTER=mock
+
+# Notifications — "console" locally, "resend" in prod
+NOTIFICATION_ADAPTER=console
+RESEND_API_KEY=        # blank locally
+
+# Secret store — "env" locally, "vault" in prod
+SECRET_STORE=env
+```
+
+### Production promotion checklist
+
+When ready to deploy, the only things that change are environment variables and the infra wiring. The codebase ships unchanged.
+
+| Local | Production swap |
+|---|---|
+| Postgres in Docker | Neon / Supabase managed Postgres — update `DATABASE_URL` |
+| Redis in Docker | Upstash or Redis Cloud — update `REDIS_URL` |
+| Local JWT signing | Rotate `JWT_SECRET` to a strong secret; or swap to Supabase Auth by implementing an alternate `get_current_user` dependency |
+| `NOTIFICATION_ADAPTER=console` | Set `NOTIFICATION_ADAPTER=resend` + add `RESEND_API_KEY` |
+| `SECRET_STORE=env` | Set `SECRET_STORE=vault` + wire `VaultSecretStore` implementation |
+| `CUSTODIAN_ADAPTER=mock` | Set `CUSTODIAN_ADAPTER=anchorage` + implement `AnchorageCustodianAdapter` |
+| `docker compose up` | Deploy containers to Railway / Fly.io; frontend to Vercel |
+
+No domain logic changes. No data model changes. The only code changes for productionalization are adding concrete adapter implementations (one class per external provider).
 
 **Rules for adapter implementors (when wiring real providers):**
 1. Match the Protocol exactly — no extra required params.
@@ -352,7 +442,11 @@ app.dependency_overrides[CustodianAdapter] = get_custodian_adapter
 
 ### Authentication
 
-Supabase Auth issues JWTs on login. Every request to the FastAPI backend must include `Authorization: Bearer <token>`. A FastAPI dependency (`get_current_user`) validates the token signature and extracts:
+Locally: FastAPI issues JWTs directly using `python-jose` with a signing key from `.env.local`. The `/auth/login` endpoint takes email + password, validates against the local `users` table, and returns a signed JWT. No external service required.
+
+In production: swap the `get_current_user` dependency to validate tokens issued by Supabase Auth or Auth0. The JWT shape (`role`, `org_id` claims) stays identical — no other code changes.
+
+Every request must include `Authorization: Bearer <token>`. A FastAPI dependency (`get_current_user`) validates the token signature and extracts:
 
 ```python
 @dataclass
