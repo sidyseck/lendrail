@@ -154,15 +154,20 @@ AES-256-GCM with a random 12-byte nonce is the right construction. Deriving the 
 
 ## Must-fix before implementation (checklist)
 
-- [ ] **Replace `python-jose` with `pyjwt`** (Blocker #1) — update `core/security.py`, `deps.py` error import, and the pin.
-- [ ] **Fix the test-DB / pytest-asyncio version interaction** (Blocker #2) — bump to ≥0.24, set `asyncio_default_fixture_loop_scope`, or function-scope the engine; show the loop config in `conftest.py`.
-- [ ] **Ship a real ARQ cron** for `health_check_job` so the 60s criterion is met (Major #3), and **specify ERROR+traceback logging** for failed jobs with a test (Major #4).
-- [ ] **Add the M2 gate** making custodian ciphertext-in-Postgres a precondition of F-024, and document the in-memory store's single-process limitation (Major #5).
-- [ ] **Decide adapter Protocol sync vs async** — recommend async now (decision 2); update spec + ARCHITECTURE.md §5.
-- [ ] **Constrain prod secret-store key** to high-entropy `SECRET_STORE_KEY`; document the JWT-rotation/ciphertext coupling (decision 7 / Major #6).
-- [ ] **Mark migrate-on-start as local-only**, add wait-for-postgres, note prod gated migration job (decision 5).
+Blocker + Major items resolved in spec rev 2 (2026-06-05):
+
+- [x] **Replace `python-jose` with `pyjwt`** (Blocker #1) — `core/security.py`, `deps.py` import (`PyJWTError`), and the pin updated.
+- [x] **Fix the test-DB / pytest-asyncio version interaction** (Blocker #2) — bumped to `>=0.24`, set `asyncio_default_fixture_loop_scope="session"`; loop requirement stated in §15.
+- [x] **Ship a real ARQ cron** for `health_check_job` (Major #3) and **explicit ERROR+traceback logging** via `after_job_end` hook, asserted in `test_worker.py` (Major #4).
+- [x] **Add the M2 gate** making custodian ciphertext-in-Postgres a precondition of F-024, plus documented single-process limitation (Major #5).
+- [x] **Adapter Protocols made async now** (decision 2) — spec updated; ARCHITECTURE.md §5 update tracked separately.
+- [x] **Constrain prod secret-store key** to high-entropy `SECRET_STORE_KEY`; documented JWT-rotation/ciphertext coupling (decision 7 / Major #6).
+- [x] **Marked migrate-on-start as local-only**, added wait-for-postgres, noted prod gated migration job (decision 5).
+
+Minor items deferred to implementation time (non-blocking, noted in spec §17):
+
 - [ ] **Implement constant-time login** in code to match the prose claim (Minor #10).
-- [ ] **Editorial**: fix the self-referential `/healthz` note; state F-010-owned F-001 criteria; drop unused `python-multipart`.
+- [ ] **Editorial**: ~~self-referential `/healthz` note~~ (fixed); state F-010-owned F-001 criteria; drop unused `python-multipart`.
 
 ---
 

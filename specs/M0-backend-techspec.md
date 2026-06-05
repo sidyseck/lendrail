@@ -5,7 +5,7 @@
 | Milestone | M0 — Foundation (backend only) |
 | Scope | F-001 … F-009 + F-060 (F-010 React scaffold is frontend, excluded) |
 | Based on | MASTER_PRD.md v0.1, ARCHITECTURE.md v0.2, FEATURES.md |
-| Status | Implementation-ready spec |
+| Status | Implementation-ready spec (rev 2 — tech-lead blocker/major fixes applied) |
 | Audience | Backend engineer implementing M0 |
 
 ---
@@ -214,7 +214,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 > **Choice:** `uv` for fast, reproducible installs from `pyproject.toml`. Same image serves both `api` and `worker` (command overridden in compose).
 
 ### docker-compose service contracts (backend-relevant)
-- `api`: `command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`, `env_file: .env.local`, `ports: ["8000:8000"]`, `depends_on: [postgres, redis]`. An entrypoint runs `alembic upgrade head` before uvicorn so a clean checkout boots with schema present (satisfies "starts without errors on clean checkout").
+- `api`: `command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`, `env_file: .env.local`, `ports: ["8000:8000"]`, `depends_on: [postgres, redis]`. A **local-only** entrypoint script **waits for postgres** (e.g. `pg_isready` loop) then runs `alembic upgrade head` before uvicorn, so a clean checkout boots with schema present (satisfies "starts without errors on clean checkout"). **Prod does NOT auto-migrate on start** — migrations run as a separate gated job to avoid races across replicas (decision 5, §17).
 - `worker`: `command: python -m app.workers.arq_worker` (or `arq app.workers.arq_worker.WorkerSettings`), same `env_file`, `depends_on: [postgres, redis]`.
 - `postgres`: `postgres:16`, db/user/pass `lendrail`, named volume `pgdata`.
 - `redis`: `redis:7-alpine`.
@@ -231,7 +231,7 @@ router = APIRouter(tags=["health"])
 async def healthz() -> HealthResponse:
     return HealthResponse(status="ok")
 ```
-`HealthResponse` is `{ "status": "ok" }`. (Note: PRD/arch sometimes shows `/healthz`; this spec standardizes on `/healthz` per F-001 acceptance criteria.)
+`HealthResponse` is `{ "status": "ok" }`. (ARCHITECTURE.md does not specify a health path; `/healthz` is canonical here, matching the F-001 acceptance criteria verbatim.)
 
 ---
 
@@ -422,7 +422,8 @@ class AuthUser:
 ```python
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
-from jose import jwt, JWTError
+import jwt                                   # PyJWT
+from jwt import PyJWTError
 from app.core.config import get_settings
 
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -439,8 +440,10 @@ def create_access_token(*, user_id: str, org_id: str | None, role: str) -> str:
 
 def decode_access_token(token: str) -> dict:
     s = get_settings()
-    return jwt.decode(token, s.jwt_secret, algorithms=[s.jwt_algorithm])  # raises JWTError
+    # PyJWT verifies signature + exp; raises PyJWTError subclasses on failure.
+    return jwt.decode(token, s.jwt_secret, algorithms=[s.jwt_algorithm])
 ```
+> **Library choice:** **PyJWT** (not `python-jose`, which is effectively unmaintained — no substantive release since 2021). Near drop-in: `jwt.encode`/`jwt.decode` have the same shape; the failure type is `jwt.PyJWTError` (and subclasses like `ExpiredSignatureError`, `InvalidSignatureError`).
 
 ### 6.3 User model (`app/models/user.py`)
 ```python
@@ -605,6 +608,7 @@ class ConsoleNotificationAdapter:
 ### `app/workers/arq_worker.py`
 ```python
 import logging
+from arq import cron
 from arq.connections import RedisSettings
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -614,6 +618,14 @@ log = logging.getLogger("lendrail.worker")
 async def health_check_job(ctx) -> str:
     log.info("health_check_job ran", extra={"job_id": ctx.get("job_id")})
     return "ok"
+
+async def on_job_end(ctx) -> None:
+    """ARQ after-job hook. Logs any job exception at ERROR with full traceback,
+    guaranteeing the F-007 'failed job logged at ERROR with traceback' criterion
+    rather than relying on ARQ's default formatting. Worker keeps running."""
+    exc = ctx.get("exception")
+    if exc is not None:
+        log.error("job %s failed", ctx.get("job_id"), exc_info=exc)
 
 async def startup(ctx) -> None:
     configure_logging()
@@ -629,17 +641,17 @@ class WorkerSettings:
     functions = [health_check_job]
     on_startup = startup
     on_shutdown = shutdown
+    after_job_end = on_job_end
     redis_settings = _redis_settings()
     cron_jobs = [
-        # runs every minute as smoke test (F-007)
-        # cron(health_check_job, second=0)
+        cron(health_check_job, second=0),   # fires every minute on the :00 second (F-007 smoke)
     ]
     max_tries = 3
     job_timeout = 30
 ```
 - `REDIS_URL` from env (acceptance criterion).
-- A failing job logs at ERROR with traceback and the worker does **not** crash — ARQ's default behavior; we set `max_tries=3` and ensure the job body lets exceptions propagate so ARQ logs them. A dedicated `failing_job` is used only in tests.
-- Cron registration: use `arq.cron(health_check_job, second=0)` to run every minute (configurable interval is informational in M0; the 60s smoke cadence is fixed). Run via `arq app.workers.arq_worker.WorkerSettings`.
+- **Cron is shipped, not commented** — `cron(health_check_job, second=0)` fires every minute, satisfying F-007's "runs every 60 seconds" criterion. Run via `arq app.workers.arq_worker.WorkerSettings`.
+- **Failed-job ERROR logging is explicit**, not assumed: the `after_job_end` hook (`on_job_end`) inspects `ctx["exception"]` and logs at ERROR with `exc_info` (full traceback); the worker process keeps running. A dedicated `failing_job` is registered only in the test build to drive `test_worker.py`.
 
 > **Choice:** ARQ over Celery — single async runtime shared with FastAPI, Redis-only, no result-backend ceremony.
 
@@ -687,16 +699,16 @@ class AssetPrice:
     source: str
 
 class CustodianAdapter(Protocol):
-    def get_inventory(self, account_ref: str) -> list[InventoryPosition]: ...
-    def get_collateral(self, loan_ref: str) -> CollateralPosition | None: ...
-    def validate_key(self) -> bool: ...
-    def transmit_instruction(self, instruction_type: str, asset_type: str, quantity: float,
-                             from_account: str, to_account: str, agent_ref: str) -> InstructionResult: ...
+    async def get_inventory(self, account_ref: str) -> list[InventoryPosition]: ...
+    async def get_collateral(self, loan_ref: str) -> CollateralPosition | None: ...
+    async def validate_key(self) -> bool: ...
+    async def transmit_instruction(self, instruction_type: str, asset_type: str, quantity: float,
+                                   from_account: str, to_account: str, agent_ref: str) -> InstructionResult: ...
 
 class MarketDataAdapter(Protocol):
-    def get_price(self, asset_type: str) -> AssetPrice: ...
+    async def get_price(self, asset_type: str) -> AssetPrice: ...
 ```
-> **Decision (sync Protocols):** mock adapter methods are **sync** as written in the architecture. Real network adapters in later phases will need async; to avoid a breaking signature change we recommend the tech lead decide now whether to make the Protocols `async def`. This spec keeps them sync to match the reference architecture verbatim and flags it explicitly in §16.
+> **Decision (async Protocols — resolved):** adapter methods are **`async def`**. Although the reference architecture sketched them as sync, the real custodian/market-data clients (Anchorage, price feeds) are network-bound and belong on the event loop. With **zero real call sites in M0**, making them async now is near-free and avoids a breaking signature change across every service/worker/test later. Mock implementations are `async def` accordingly and callers `await` them. ARCHITECTURE.md §5 should be updated to match (tracked separately).
 
 ### Mock implementations
 - `MockCustodianAdapter` — verbatim from ARCHITECTURE §5 (`app/adapters/mock_custodian.py`). Seedable inventory/collateral via constructor for tests. `validate_key()` returns `True` by default; a `validate_key_result` constructor kwarg lets tests seed a `False` for F-024 later.
@@ -705,10 +717,11 @@ class MarketDataAdapter(Protocol):
 class MockMarketDataAdapter:
     def __init__(self, price_usd: float | None = None) -> None:
         self._price = price_usd if price_usd is not None else get_settings().mock_btc_price_usd
-    def get_price(self, asset_type: str) -> AssetPrice:
+    async def get_price(self, asset_type: str) -> AssetPrice:
         return AssetPrice(asset_type=asset_type, price_usd=self._price,
                           as_of=datetime.now(timezone.utc), source="mock")
 ```
+> `MockCustodianAdapter` methods are likewise `async def` (the architecture's body is otherwise unchanged — it does no real I/O, so each method simply becomes a coroutine). Tests `await` all adapter calls.
 
 ### Provider factory (`app/adapters/providers.py`)
 ```python
@@ -762,7 +775,11 @@ def decrypt(token_b64: str, secret: str) -> str:
     raw = base64.b64decode(token_b64); nonce, ct = raw[:12], raw[12:]
     return AESGCM(_derive_key(secret)).decrypt(nonce, ct, None).decode()
 ```
-> **Choice:** AES-256-**GCM** (not CBC) for authenticated encryption — tamper-detection for free, prefixed 12-byte nonce. The encryption key is derived from `JWT_SECRET` per F-009 acceptance ("or a dedicated `SECRET_STORE_KEY`").
+> **Choice:** AES-256-**GCM** (not CBC) for authenticated encryption — tamper-detection for free, prefixed 12-byte nonce. The key is the SHA-256 of `SECRET_STORE_KEY` (or `JWT_SECRET` as a local fallback).
+>
+> **Production constraints (mandatory outside `local`):**
+> 1. **A dedicated, high-entropy random `SECRET_STORE_KEY` is required** in `test`/`prod` — never fall back to `JWT_SECRET`. Bare `SHA-256` is acceptable for a high-entropy machine secret but is **not** a password-based KDF; a low-entropy human value would be weak. (Optionally switch derivation to HKDF for hygiene.) `.env.local.example` documents this and the prod path.
+> 2. **Key coupling caveat:** if `SECRET_STORE_KEY` is unset and the key derives from `JWT_SECRET`, then **rotating `JWT_SECRET` also invalidates every stored ciphertext** (it can no longer be decrypted). Rotation runbooks must decouple the two by setting an explicit `SECRET_STORE_KEY`. The real prod path is a managed vault, not this primitive.
 
 ### EnvSecretStore (`app/secrets/env_store.py`)
 ```python
@@ -794,7 +811,9 @@ class EnvSecretStore:
 - `store()` returns a UUID ref; `retrieve()` returns plaintext; bad ref → `SecretNotFoundError` (acceptance criteria).
 - Plaintext never logged — guaranteed by (a) never passing secrets to `log`, and (b) the redaction filter (§13). A unit test captures logs to prove it.
 
-> **Tech-lead flag:** M0's store is process-local (a dict). The architecture envisions an encrypted DB column. For M0 (no domain tables that need it yet) in-memory is fine and keeps F-009 self-contained; M2/F-024 must move ciphertext into Postgres. Called out in §16.
+> **M0 limitation (documented, not a bug):** the `EnvSecretStore` dict is **per-process**. The `api` and `worker` run as **separate containers**, and uvicorn `--reload` spawns fresh processes — so refs stored in one process are **not visible** to another and **do not survive a reload**. M0 has zero consumers of stored secrets, so this is safe *for M0 only*. **Do not build anything against this store that requires cross-process or durable retrieval.**
+>
+> **Hard M2 gate (precondition of F-024, not a footnote):** before F-024 (custodian API key registration) is implemented, the secret store **must** persist ciphertext to Postgres (e.g. an `encrypted_secrets` table, or the ciphertext stored alongside the `custodian_links.encrypted_api_key_ref`). F-024 stores a key in one request (api process) that the worker/another request later retrieves — the in-memory store would silently lose it. This is a blocking dependency for M2 and is tracked in §16 / decision 3.
 
 ---
 
@@ -807,7 +826,7 @@ All wiring lives in one provider module. Routes get session, current user, adapt
 from typing import Annotated
 from uuid import UUID
 from fastapi import Depends, Header
-from jose import JWTError
+from jwt import PyJWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 from app.schemas.auth import AuthUser
@@ -831,7 +850,7 @@ async def get_current_user(authorization: str = Header(default="")) -> AuthUser:
     token = authorization.split(" ", 1)[1]
     try:
         claims = decode_access_token(token)
-    except JWTError:
+    except PyJWTError:
         raise AuthError("invalid_token")
     return AuthUser(user_id=UUID(claims["sub"]),
                     org_id=UUID(claims["org_id"]) if claims.get("org_id") else None,
@@ -949,10 +968,12 @@ A logging `Filter` that scrubs known secret keys (`password`, `api_key`, `hashed
 ## 15. Testing approach
 
 ### Layout
-`backend/tests/` (one file per F-ID, see §1 tree). Framework: **pytest + pytest-asyncio** (`asyncio_mode=auto`), HTTP via **httpx.AsyncClient + ASGITransport**.
+`backend/tests/` (one file per F-ID, see §1 tree). Framework: **pytest + pytest-asyncio `>=0.24`** (`asyncio_mode=auto`, `asyncio_default_fixture_loop_scope="session"`), HTTP via **httpx.AsyncClient + ASGITransport**.
 
 ### Test database strategy
 > **Choice: transactional rollback per test against a dedicated test DB.** A session-scoped fixture creates a `lendrail_test` database (or uses `DATABASE_URL` with `?...` swap) and runs `alembic upgrade head` once. Each test opens a connection, begins an outer transaction, binds the session to it, and **rolls back** at teardown. This is fast (no re-migration per test) and fully isolated. We do not use create_all/drop_all per test — migrations are the schema source of truth, exercising F-002.
+>
+> **Event-loop requirement (mandatory, not optional):** the session-scoped `test_engine` fixture and the function-scoped per-test fixtures must run on **one shared event loop**. This requires `pytest-asyncio>=0.24` and `asyncio_default_fixture_loop_scope = "session"` in `pyproject.toml` (set in §16). Under the previously-pinned 0.23 this exact pattern (session async fixture + function tests) breaks with cross-loop errors. If a future engineer prefers to avoid session-scoped async fixtures entirely, the sanctioned alternative is a **function-scoped engine** — but the session-scoped form is preferred for speed and is what conftest below assumes.
 
 ### `conftest.py` fixtures (signatures)
 ```python
@@ -989,7 +1010,7 @@ Mock adapters in tests: injected via `app.dependency_overrides[get_custodian_ada
 | F-004 | `test_auth.py` | login valid→200+token; wrong pw→401; no token→401 on `/auth/me`; tampered token→401; decoded claims have `user_id/org_id/role` types; key from `JWT_SECRET` |
 | F-005 | `test_rbac.py` | agent-guarded route + supplier token→403; supplier-guarded + agent→403; admin passes admin guard; all 3×3 combos; only `AuthUser` crosses into services |
 | F-006 | `test_notifications.py` | `send(NotificationEvent("test",[uid]))` logs structured line w/ event+recipients (caplog); writes `notifications` row; no external call |
-| F-007 | `test_worker.py` | `health_check_job(ctx)` returns "ok"/logs; a `failing_job` raises → logged at ERROR, worker config survives; `REDIS_URL` read from env |
+| F-007 | `test_worker.py` | `health_check_job(ctx)` returns "ok"/logs; `WorkerSettings.cron_jobs` contains a cron firing every minute (assert the entry exists); `on_job_end` with a seeded `ctx["exception"]` logs at ERROR with `exc_info` (caplog asserts level + traceback) and does not raise; `REDIS_URL` read from env |
 | F-008 | `test_adapters.py` | all 4 custodian methods on mock; `get_inventory` → ≥1 BTC position w/ non-null as_of; `validate_key` True; `transmit_instruction` success+non-empty ref; market `get_price` positive; non-mock env → `NotImplementedError` |
 | F-009 | `test_secret_store.py` | `store` returns UUID; `retrieve` round-trips plaintext; plaintext absent from caplog; bad ref → `SecretNotFoundError`; key derived from `JWT_SECRET` |
 | F-060 | `test_openapi.py` | `GET /openapi.json` → 200 valid OpenAPI 3.x; `info.title=="LendRail API"`; `/auth/login` path present; `LoginRequest`/`TokenResponse` schemas present |
@@ -1014,7 +1035,7 @@ dependencies = [
     "pydantic>=2.7,<3.0",
     "pydantic-settings>=2.3,<3.0",
     "email-validator>=2.1,<3.0",          # EmailStr support
-    "python-jose[cryptography]>=3.3,<4.0",
+    "pyjwt>=2.8,<3.0",                     # JWT encode/decode (python-jose is unmaintained)
     "passlib[bcrypt]>=1.7.4,<2.0",
     "bcrypt>=4.1,<5.0",                    # pin: passlib+bcrypt 4.x compat
     "cryptography>=42.0,<44.0",           # AES-256-GCM
@@ -1026,7 +1047,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2,<9.0",
-    "pytest-asyncio>=0.23,<0.24",
+    "pytest-asyncio>=0.24,<0.26",         # >=0.24 for stable cross-scope event loops (see test-DB strategy)
     "httpx>=0.27,<0.28",
     "ruff>=0.5,<0.7",
     "mypy>=1.10,<2.0",
@@ -1035,6 +1056,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"   # required: session-scoped engine shares one loop with function-scoped tests
 testpaths = ["tests"]
 
 [tool.ruff]
@@ -1046,17 +1068,27 @@ python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 ```
-> **Pin notes:** `bcrypt` pinned `<5` because passlib 1.7.4 reads `bcrypt.__about__` which 5.x removed — a common breakage. `python-jose[cryptography]` uses the `cryptography` backend (same lib as our AES). `pydantic>=2.7` for stable v2 settings behavior.
+> **Pin notes:** `bcrypt` pinned `<5` because passlib 1.7.4 reads `bcrypt.__about__` which 5.x removed — a common breakage (M1/F-012 should retire passlib in favor of `bcrypt` directly or `pwdlib`). **`pyjwt` replaces `python-jose`** (the latter is unmaintained with an unpatched advisory surface). `pytest-asyncio` pinned `>=0.24` and `asyncio_default_fixture_loop_scope="session"` is mandatory — the session-scoped migrated engine + per-test rollback fixture must share one event loop; 0.23 broke this. `pydantic>=2.7` for stable v2 settings behavior.
 
 ---
 
-## 17. Decisions a tech lead should scrutinize
+## 17. Decisions — tech-lead review outcomes
 
-1. **`users.org_id` nullable + `role` on user in M0.** Auth needs a user table before `organizations` exists (M1). We ship `users` now with a nullable `org_id` (FK added in M1) and `role` on the user. Alternative: defer all auth wiring behind a stub until M1. Recommend accepting the concession; it's the minimal seam.
-2. **Sync vs async adapter Protocols.** Architecture defines mock adapter methods as **sync**. Real custodian/market clients will be network-bound (want async). Decide now whether to make the Protocols `async def` to avoid a later breaking change across every call site. This spec kept them sync to match the reference verbatim.
-3. **Secret store is process-local (in-memory dict) in M0.** Architecture envisions an encrypted DB column / vault. M0 has no table needing it yet; M2/F-024 must persist ciphertext to Postgres. Confirm we're comfortable with the in-memory store for M0 + tests only.
-4. **Test DB strategy = transactional rollback against a real migrated DB** (not create_all/drop). Slightly more fixture plumbing but exercises real migrations and is fast. Confirm preference vs. a fresh schema per test.
-5. **Migrations auto-applied on `api` container start** (`alembic upgrade head` in entrypoint) to satisfy "clean checkout boots". Fine for local; in prod migrations should be a separate gated step. Flag so it isn't copied to prod blindly.
-6. **`/healthz` path** standardized (some PRD text shows variations). Confirm the canonical health path before the frontend/infra hardcode it.
-7. **AES key derived from `JWT_SECRET` via SHA-256** when `SECRET_STORE_KEY` unset. Acceptable for local; for prod a dedicated, rotated `SECRET_STORE_KEY` is mandatory. Ensure `.env.local.example` documents this.
+The tech-lead review (`M0-backend-techspec-review.md`) resolved all seven flagged items. Resolutions are now folded into the spec above.
+
+1. **`users.org_id` nullable + `role` on user in M0** — **APPROVED as-is.** Auth needs a user table before `organizations` exists (M1). M0 ships `users` with a nullable `org_id` (FK added in M1) and `role` on the user. **M1 obligation:** F-011/F-012 migration must add the FK and backfill/validate `org_id` before making it non-null.
+2. **Adapter Protocols** — **RESOLVED → async.** Protocols and mock methods are now `async def` (§10) to avoid a later breaking change across all call sites; ARCHITECTURE.md §5 to be updated to match.
+3. **Secret store process-local in M0** — **APPROVED with change (applied).** §11 now documents the single-process limitation and adds a **hard M2 gate** making ciphertext-in-Postgres a precondition of F-024.
+4. **Test DB strategy = transactional rollback against a real migrated DB** — **APPROVED with change (applied).** Kept the strategy; bumped `pytest-asyncio>=0.24` and pinned `asyncio_default_fixture_loop_scope="session"` (§15/§16) so the session-scoped engine and function-scoped tests share one event loop.
+5. **Migrations auto-applied on `api` container start** — **APPROVED with change.** Entrypoint `alembic upgrade head` is **local-only**; it must wait-for-postgres first, and prod uses a separate gated migration job (never auto-migrate across replicas). See §3.
+6. **`/healthz` canonical** — **APPROVED as-is.** ARCHITECTURE.md is silent on a health path; `/healthz` (matching F-001 verbatim) is canonical. Self-referential note in §3 cleaned.
+7. **AES key derivation** — **APPROVED with change (applied).** §11 now mandates a high-entropy random `SECRET_STORE_KEY` outside `local` (no `JWT_SECRET` fallback) and documents that coupling the key to `JWT_SECRET` means a JWT rotation invalidates stored ciphertext. Prod path is a managed vault.
+
+### Library/dependency changes from review (applied)
+- **`python-jose` → `pyjwt`** (Blocker): the former is unmaintained. §6.2/§12/§16 updated.
+- **`pytest-asyncio` `>=0.24`** + explicit session loop scope (Blocker): §16.
+- **`passlib` retirement** flagged for M1/F-012 (Minor): prefer `bcrypt` directly or `pwdlib` before a bcrypt-5 upgrade.
+
+### Remaining minor items (deferred, non-blocking)
+These review minors are intentionally left for implementation time, not blockers: constant-time login dummy-hash in code (§6.4 prose already specifies it — implement in code), worker per-job session/commit boundary (define at M4), drop unused `python-multipart`, and noting the two F-001 criteria (`localhost:5173` HTML, full `compose down -v`/`up`) are jointly owned with F-010 at integration.
 ```
