@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: lendrail
+      POSTGRES_USER: lendrail
+      POSTGRES_PASSWORD: lendrail
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lendrail -d lendrail"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    command: >
+      sh -c "
+        until pg_isready -h postgres -U lendrail -d lendrail; do
+          echo 'waiting for postgres...'; sleep 2;
+        done &&
+        alembic upgrade head &&
+        uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+      "
+    env_file: .env.local
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+
+  worker:
+    build: ./backend
+    command: arq app.workers.arq_worker.WorkerSettings
+    env_file: .env.local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build: ./frontend
+    command: npm run dev -- --host
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+    profiles:
+      - frontend
+
+volumes:
+  pgdata:
