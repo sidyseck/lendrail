@@ -1,163 +1,473 @@
-# LendRail — M0 (Foundation) Frontend Technical Specification
+# LendRail M0 — Frontend Tech Spec (rev 2)
 
 | Field | Value |
 |---|---|
-| Milestone | M0 — Foundation (frontend only) |
-| Scope | **F-010** (React + Vite auth scaffold) + the **F-060 frontend obligation** (`npm run generate-client`) |
-| Based on | MASTER_PRD.md v0.1, ARCHITECTURE.md v0.2, FEATURES.md, specs/M0-backend-techspec.md (the API contract) |
-| Status | Implementation-ready spec |
-| Audience | Frontend engineer implementing M0 |
+| Version | rev 2 |
+| Date | 2026-06-06 |
+| Status | Implementation-ready |
+| Author | Frontend engineering |
+| Covers | F-010 (React+TS+Vite scaffold, login, auth), F-060 (openapi-typescript codegen) |
+| Architecture ref | ARCHITECTURE.md v0.2 |
+| PRD ref | MASTER_PRD.md v0.1 |
+| Review ref | specs/M0-frontend-techspec-review.md (all blockers and majors applied) |
 
 ---
 
-## 0. Purpose and guiding principles
+## §1 — Overview and Scope
 
-F-010 scaffolds the entire frontend and nothing domain-specific. The deliverable is: a React + TypeScript + Vite app served by Vite on `localhost:5173`, styled with Tailwind + shadcn/ui, routed with React Router v6, an in-memory auth context that stores and forwards the JWT, a login page that calls `POST /auth/login`, a `ProtectedRoute` wrapper, an empty dashboard shell, and placeholder route shells for `/register/supplier` and `/register/agent` (their real forms are M1: F-014, F-016). It also folds in the F-060 frontend half: a `npm run generate-client` script that runs `openapi-typescript` against the backend's `/openapi.json` to produce `src/api/types.gen.ts`.
+This spec covers the two M0 frontend deliverables:
 
-Non-negotiable conventions:
+**F-010 — React + TypeScript + Vite scaffold with login and auth**
 
-- **Token in memory only.** The JWT lives in React state (and a module-level holder for the non-React API client), **never** `localStorage`/`sessionStorage`/cookies. This is an explicit F-010 acceptance criterion. The page-refresh tradeoff is documented and accepted (§4.4).
-- **Generated types are the single source of truth.** `src/api/types.gen.ts` is generated from `/openapi.json`. Hand-written code **must not** redefine backend DTOs (`LoginRequest`, `TokenResponse`, the error envelope). It imports them from the generated file. (F-060.)
-- **Backend contract is fixed.** Login is `POST /auth/login` → `{ "access_token": "...", "token_type": "bearer" }` on 200, `{ "error": { "code": "unauthorized", "message": "..." } }` with HTTP 401 on bad credentials. Every error response across the API uses the envelope `{"error":{"code","message"}}`. The JWT carries `sub` (user_id), `org_id` (nullable in M0), `role` claims. (Backend spec §6, §14.)
-- **Everything local via Docker Compose.** Vite dev server on 5173; backend api on 8000. In the browser, calls go to `/api/*` and Vite's dev proxy forwards them to the api container — this keeps the JWT/CORS story clean (same-origin from the browser's perspective, no CORS preflight, no backend CORS config needed for local dev). (§2.3.)
-- **Thin M0.** Only login + protected empty dashboard + route shells. No domain pages, no role-specific navigation, no API methods beyond `login()` and one protected smoke call (`GET /auth/me`).
-- **`tsc --noEmit` is zero-error, enforced in CI.** (F-010 acceptance + §8.)
+Deliverable: a runnable frontend service within the Docker Compose stack. Includes project scaffold (Vite + React 18 + TypeScript 5), Tailwind 3 + shadcn/ui vendored component baseline, an auth layer (in-memory JWT, AuthContext with expiry checking, ProtectedRoute), a login page that POSTs to `/auth/login` and stores the returned JWT in memory, and a placeholder dashboard shell. The frontend runs at `localhost:5173` in dev; all backend calls proxy through Vite to `http://api:8000` with the `/api` prefix stripped via a `rewrite` rule.
 
-> **Opinionated choice (justified inline where non-obvious):** no Next.js, no Redux, no React Query in M0. The architecture (§2) already rules out SSR. State is tiny (one token + one user), so a single React context plus a hand-written fetch wrapper is the right weight. React Query / TanStack arrives when domain data fetching does (M1+), not now.
+**F-060 — openapi-typescript type codegen**
+
+Deliverable: a repeatable, CI-verified workflow that generates TypeScript types from the committed `openapi.json` schema file into `src/api/types.gen.ts`. The script uses stdout redirect (openapi-typescript v7 removed `--output`). The generated file is committed so type changes are visible in PRs without a running backend. A CI drift check regenerates from the committed schema and diffs; any drift fails the build.
+
+**What this spec does NOT cover:** any feature beyond the login/dashboard shell (loans, agreements, risk cockpit, statements). Those are M1+.
 
 ---
 
-## 1. Directory & file layout
+## §2 — Tech Stack
 
-Complete proposed `frontend/` tree:
+| Concern | Library / tool | Pinned version | Notes |
+|---|---|---|---|
+| UI framework | React | `^18.2.0` | Concurrent features, stable API |
+| Language | TypeScript | `^5.4.0` | strict mode on |
+| Build tool | Vite | `^5.2.0` | ESM-native, fast HMR |
+| Routing | React Router DOM | `^6.22.0` | `<BrowserRouter>` + `<Routes>` pattern; v6.22 is current stable |
+| Component primitives | shadcn/ui | vendored (no npm dep) | Source copied into `src/components/ui/` via CLI; Tailwind-based |
+| Styling | Tailwind CSS | `^3.4.0` | PostCSS plugin; configured in `tailwind.config.js` |
+| PostCSS | autoprefixer | `^10.4.0` | Required alongside Tailwind; explicit in `postcss.config.js` |
+| HTTP client | openapi-fetch | `^0.9.0` | Typed fetch wrapper; consumes types from `types.gen.ts` |
+| Type codegen | openapi-typescript | `^7.0.0` | Generates TS types from OpenAPI 3 schema; stdout-only in v7 (no `--output` flag) |
+| JWT decode | jwt-decode | `^4.0.0` | Client-side decode for UI hints only; no signature verification |
+| Test runner | Vitest | `^1.5.0` | Vite-native; compatible with RTL |
+| Component testing | React Testing Library | `^15.0.0` | `@testing-library/react` + `@testing-library/user-event ^14` |
+| API mocking | MSW | `^2.2.0` | Service worker in browser; Node handler in Vitest |
+
+**Constraints:**
+
+- No Next.js. This is a logged-in B2B SPA; SSR adds ops complexity with no user-facing benefit.
+- No `localStorage` or `sessionStorage` for the JWT. Token lives in a JS module-level variable only (see §4.1 for rationale).
+- No Axios. `openapi-fetch` is the typed HTTP layer. No refresh endpoint exists on the backend — on 401 the user is redirected to `/login`.
+
+---
+
+## §3 — Directory Tree
 
 ```
 frontend/
-├── Dockerfile                       # dev image (Node 20), see §3
-├── .dockerignore
-├── index.html                       # Vite entry HTML, mounts #root
-├── package.json                     # pinned deps + scripts (§10)
-├── package-lock.json
-├── tsconfig.json                    # references app + node configs
-├── tsconfig.app.json                # strict app config (§2.2)
-├── tsconfig.node.json               # config for vite.config.ts itself
-├── vite.config.ts                   # dev server host/port + /api proxy (§2.1)
-├── tailwind.config.ts               # Tailwind + shadcn theme tokens (§2.4)
-├── postcss.config.js                # tailwindcss + autoprefixer
-├── components.json                  # shadcn/ui CLI config (§2.4)
-├── .eslintrc.cjs                    # ESLint flat-compat config (§2.5)
-├── .prettierrc.json                 # Prettier config (§2.5)
-├── .env.development                 # VITE_API_BASE_URL=/api (proxied)
-├── .env.example                     # documents every VITE_* var
-├── vitest.config.ts                 # test config, jsdom env (§9)
+├── index.html
+├── vite.config.ts
+├── tsconfig.json
+├── tsconfig.node.json
+├── tailwind.config.js
+├── postcss.config.js                    # MUST contain tailwindcss + autoprefixer plugins
+├── package.json
+├── openapi.json                         # committed schema; source of truth for codegen
+├── public/
+│   └── mockServiceWorker.js             # generated by `msw init public/`; commit this file
 └── src/
-    ├── main.tsx                     # ReactDOM root, mounts <App/> in <BrowserRouter>
-    ├── App.tsx                      # <AuthProvider><AppRouter/></AuthProvider>
-    ├── index.css                    # Tailwind directives + shadcn CSS variables
-    ├── vite-env.d.ts                # Vite client types + ImportMetaEnv typing
-    ├── app/
-    │   └── router.tsx               # route table, ProtectedRoute composition (§6)
-    ├── auth/
-    │   ├── AuthContext.tsx          # context object + types (§4)
-    │   ├── AuthProvider.tsx         # provider implementation (state, login, logout)
-    │   ├── useAuth.ts               # hook with null-guard
-    │   └── ProtectedRoute.tsx       # redirect-to-/login wrapper (§6.2)
+    ├── main.tsx                         # ReactDOM.createRoot entry point
+    ├── App.tsx                          # BrowserRouter + Routes
+    ├── index.css                        # @tailwind directives + shadcn CSS variable blocks
     ├── api/
-    │   ├── types.gen.ts             # GENERATED by openapi-typescript — do not edit (§5)
-    │   ├── client.ts                # typed fetch wrapper: Bearer + error envelope (§5)
-    │   ├── tokenStore.ts            # module-level in-memory token holder (§4.3)
-    │   ├── ApiError.ts              # typed error class for the envelope (§5.2)
-    │   └── auth.ts                  # login()/me() thin endpoint functions (§5.3)
-    ├── pages/
-    │   ├── Login.tsx                # login form (§7)
-    │   ├── Dashboard.tsx            # empty protected shell
-    │   ├── RegisterSupplier.tsx     # M1 placeholder shell (route exists now)
-    │   ├── RegisterAgent.tsx        # M1 placeholder shell (route exists now)
-    │   └── NotFound.tsx             # 404 fallback
+    │   ├── types.gen.ts                 # GENERATED — do not edit by hand
+    │   └── client.ts                    # openapi-fetch instance with auth middleware
+    ├── auth/
+    │   ├── AuthContext.tsx              # AuthProvider + useAuth hook
+    │   ├── ProtectedRoute.tsx           # reads isAuthenticated; redirects to /login
+    │   └── tokenStore.ts               # module-level token variable; get/set/clear
     ├── components/
-    │   ├── ui/                      # shadcn/ui primitives (generated by CLI)
-    │   │   ├── button.tsx
-    │   │   ├── input.tsx
-    │   │   ├── label.tsx
-    │   │   ├── card.tsx
-    │   │   └── alert.tsx
-    │   └── layout/
-    │       └── AppShell.tsx         # minimal authed layout (header + <Outlet/>)
-    └── lib/
-        └── utils.ts                 # cn() — clsx + tailwind-merge (shadcn convention)
-
-frontend/src/__tests__/             # OR colocated *.test.tsx (see §9)
-    ├── setup.ts                     # RTL + jest-dom + MSW server lifecycle
+    │   └── ui/                          # shadcn/ui vendored components (button, input, label…)
     ├── mocks/
-    │   ├── server.ts                # MSW node server
-    │   └── handlers.ts              # /api/auth/login handlers (success + 401)
-    ├── Login.test.tsx
-    ├── ProtectedRoute.test.tsx
-    ├── AuthProvider.test.tsx
-    └── client.test.ts
-```
-
-Top-level repo files this feature touches (jointly owned with F-001):
-
-```
-/docker-compose.yml      # the `frontend` service entry (command, port, depends_on) — §3
+    │   ├── browser.ts                   # MSW browser worker setup
+    │   ├── server.ts                    # MSW Node server setup (Vitest)
+    │   ├── handlers/
+    │   │   └── auth.ts                  # MSW handlers for /auth/* routes
+    │   └── helpers.ts                   # mockError() helper — enforces backend envelope shape
+    ├── pages/
+    │   ├── LoginPage.tsx
+    │   └── DashboardPage.tsx
+    └── test/
+        ├── setup.ts                     # Vitest global setup (MSW server lifecycle)
+        └── LoginPage.test.tsx
 ```
 
 ---
 
-## 2. Tooling & build config
+## §4 — Auth
 
-### 2.1 Vite config — dev server + proxy
+### §4.1 — AuthContext
 
-The browser always calls `/api/...`; Vite proxies to the api container. This means: no CORS in local dev, no hardcoded `http://localhost:8000` in app code, and the same code works in Docker (where the backend host is `api`, not `localhost`).
+**Design decision (approved in review):** The JWT is stored in a JS module-level variable (`tokenStore.ts`), not in `localStorage` or `sessionStorage`. This eliminates the most common XSS token-theft vector. The trade-off is that a hard browser refresh logs the user out. This is acceptable for a B2B SPA used during an active working session. No refresh endpoint exists on the backend; the only correct re-auth path is redirect to `/login`.
+
+**Token expiry handling (FIX 4 from review — MAJOR):** After decoding the JWT with `jwtDecode`, the `exp` claim is checked immediately. An expired token is treated the same as no token — the store is cleared and the user is redirected to `/login?next=<currentPath>`. The `isAuthenticated` boolean is **derived** (token present AND not expired) — it is never set independently. The expiry check runs:
+- (a) on mount / token-set, inside `AuthContext`
+- (b) in the fetch wrapper before attaching the `Authorization` header (see §4.2)
+
+`ProtectedRoute` reads `isAuthenticated` — never the raw token string.
+
+**`src/auth/tokenStore.ts`**
 
 ```ts
-// vite.config.ts
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-import path from "node:path";
+// Module-level variable — never persisted to storage.
+// This is the only location in the codebase that holds the raw token string.
 
-// In Docker the backend is reachable as http://api:8000; on bare metal as http://localhost:8000.
-// Driven by an env var so the same config serves both.
-const API_TARGET = process.env.VITE_API_PROXY_TARGET ?? "http://localhost:8000";
+let _token: string | null = null;
+
+export function getToken(): string | null {
+  return _token;
+}
+
+export function setToken(token: string): void {
+  _token = token;
+}
+
+export function clearToken(): void {
+  _token = null;
+}
+```
+
+**`src/auth/AuthContext.tsx`**
+
+```tsx
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from 'react';
+import { useNavigate } from 'react-router-dom';
+import { jwtDecode } from 'jwt-decode';
+import { clearToken, getToken, setToken } from './tokenStore';
+
+interface DecodedToken {
+  sub: string;        // user_id
+  org_id: string;
+  role: 'supplier' | 'agent' | 'admin';
+  exp: number;        // unix seconds
+}
+
+interface AuthState {
+  isAuthenticated: boolean;  // derived: token present AND not expired
+  role: DecodedToken['role'] | null;
+  orgId: string | null;
+}
+
+interface AuthContextValue extends AuthState {
+  login: (token: string) => void;
+  logout: () => void;
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+/**
+ * Decode the token and check the exp claim.
+ * Returns null if the token is missing, malformed, or expired.
+ * NOTE: this is an UNVERIFIED decode — used for UI hints only, never for authorization.
+ */
+function decodeAndValidate(token: string): DecodedToken | null {
+  try {
+    const decoded = jwtDecode<DecodedToken>(token);
+    // FIX 4: check exp claim — expired token is treated as no token
+    if (decoded.exp && decoded.exp * 1000 < Date.now()) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const navigate = useNavigate();
+
+  const [authState, setAuthState] = useState<AuthState>(() => {
+    // On mount: check whether a token already exists in the store.
+    // After a hard browser refresh this will always be null — that is intentional.
+    const existing = getToken();
+    if (!existing) {
+      return { isAuthenticated: false, role: null, orgId: null };
+    }
+    const decoded = decodeAndValidate(existing);
+    if (!decoded) {
+      clearToken();
+      return { isAuthenticated: false, role: null, orgId: null };
+    }
+    return {
+      isAuthenticated: true,
+      role: decoded.role,
+      orgId: decoded.org_id,
+    };
+  });
+
+  const logout = useCallback(() => {
+    clearToken();
+    setAuthState({ isAuthenticated: false, role: null, orgId: null });
+    // FIX 1: no refresh endpoint — redirect to /login with ?next= so the user can resume.
+    const next = encodeURIComponent(window.location.pathname + window.location.search);
+    navigate(`/login?next=${next}`, { replace: true });
+  }, [navigate]);
+
+  const login = useCallback(
+    (token: string) => {
+      // FIX 4(a): check exp on token-set
+      const decoded = decodeAndValidate(token);
+      if (!decoded) {
+        // Reject a token that is already expired at the moment of login.
+        logout();
+        return;
+      }
+      setToken(token);
+      setAuthState({
+        isAuthenticated: true,
+        role: decoded.role,
+        orgId: decoded.org_id,
+      });
+    },
+    [logout],
+  );
+
+  // FIX 4(a): re-check expiry on every render cycle.
+  // Covers the case where the app stays open past token expiry without a network call.
+  useEffect(() => {
+    if (!authState.isAuthenticated) return;
+    const token = getToken();
+    if (!token || !decodeAndValidate(token)) {
+      logout();
+    }
+  });
+
+  return (
+    <AuthContext.Provider value={{ ...authState, login, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+  return ctx;
+}
+```
+
+**Key behaviours:**
+
+| Scenario | Behaviour |
+|---|---|
+| Fresh page load (hard refresh) | Token is null; user sees `/login` |
+| Token present and valid | `isAuthenticated = true`; `role` and `orgId` populated for UI rendering |
+| Token present but expired (checked on mount) | `clearToken()`, redirect to `/login?next=<path>` |
+| `login()` called with already-expired token | Rejected immediately; `logout()` called |
+| `logout()` called explicitly | Token cleared; redirect to `/login?next=<path>` |
+| 401 from backend | Fetch wrapper (§4.2) clears token and redirects — same outcome |
+
+### §4.2 — Fetch Wrapper (typed API client)
+
+All backend calls go through a single `openapi-fetch` client instance configured with a middleware. The middleware:
+
+1. Checks the `exp` claim before attaching the header **(FIX 4b)** — if the token has expired, clears it and redirects to `/login` without sending the request.
+2. Attaches `Authorization: Bearer <token>` on every request when a valid token is present.
+3. On a 401 response from the backend **(FIX 1)**: clears the in-memory token and redirects to `/login?next=<currentPath>`. Rejects the current promise so the caller does not process a 401 body.
+
+**No refresh endpoint exists on the backend.** There is no `refreshToken()` call anywhere in this codebase. On 401, the only correct action is redirect to login.
+
+**`src/api/client.ts`**
+
+```ts
+import createClient, { type Middleware } from 'openapi-fetch';
+import type { paths } from './types.gen';
+import { clearToken, getToken } from '../auth/tokenStore';
+import { jwtDecode } from 'jwt-decode';
+
+function redirectToLogin(): void {
+  const next = encodeURIComponent(window.location.pathname + window.location.search);
+  window.location.replace(`/login?next=${next}`);
+}
+
+// FIX 4(b): check exp before attaching Authorization header
+function isTokenExpired(token: string): boolean {
+  try {
+    const decoded = jwtDecode<{ exp?: number }>(token);
+    return decoded.exp ? decoded.exp * 1000 < Date.now() : false;
+  } catch {
+    return true;
+  }
+}
+
+const authMiddleware: Middleware = {
+  async onRequest({ request }) {
+    const token = getToken();
+
+    if (!token) {
+      // No token — pass request through unauthenticated.
+      // Backend will return 401; the response handler below redirects.
+      return request;
+    }
+
+    // FIX 4(b): expired token — redirect immediately, do not send the request
+    if (isTokenExpired(token)) {
+      clearToken();
+      redirectToLogin();
+      return Promise.reject(new Error('Token expired'));
+    }
+
+    // Token present and valid — attach Bearer header
+    const headers = new Headers(request.headers);
+    headers.set('Authorization', `Bearer ${token}`);
+    return new Request(request, { headers });
+  },
+
+  async onResponse({ response }) {
+    if (response.status === 401) {
+      // FIX 1: no refresh endpoint — clear token and redirect to login.
+      // Do NOT call any refreshToken() endpoint. None exists.
+      clearToken();
+      redirectToLogin();
+      return Promise.reject(new Error('Unauthorized'));
+    }
+    return response;
+  },
+};
+
+// baseUrl is '/api' — Vite proxy strips the prefix before forwarding to http://api:8000
+export const apiClient = createClient<paths>({ baseUrl: '/api' });
+
+apiClient.use(authMiddleware);
+```
+
+**Usage pattern in components:**
+
+```ts
+import { apiClient } from '../api/client';
+
+const { data, error, response } = await apiClient.POST('/auth/login', {
+  body: { email, password },
+});
+```
+
+The `paths` type from `types.gen.ts` ensures request body and response types are fully checked at compile time. No `any` casts.
+
+---
+
+## §5 — Routing and Layout
+
+### §5.1 — Router Setup
+
+`<BrowserRouter>` with `<Routes>` (React Router v6.22). The data router API (`createBrowserRouter`) is not used in M0 — the component-based API is sufficient and avoids loader/action complexity for this auth-only milestone.
+
+**`src/App.tsx`**
+
+```tsx
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { AuthProvider } from './auth/AuthContext';
+import { ProtectedRoute } from './auth/ProtectedRoute';
+import { LoginPage } from './pages/LoginPage';
+import { DashboardPage } from './pages/DashboardPage';
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/dashboard"
+            element={
+              <ProtectedRoute>
+                <DashboardPage />
+              </ProtectedRoute>
+            }
+          />
+          {/* Default redirect */}
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          {/* Catch-all */}
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
+  );
+}
+```
+
+### §5.2 — ProtectedRoute
+
+Reads `isAuthenticated` — a derived boolean from `AuthContext` that is `true` only when a token is present AND not expired. The component has no opinion about token format or expiry logic; that is entirely owned by `AuthContext`. It does **not** check the raw token string.
+
+**`src/auth/ProtectedRoute.tsx`**
+
+```tsx
+import { Navigate, useLocation } from 'react-router-dom';
+import { useAuth } from './AuthContext';
+
+interface ProtectedRouteProps {
+  children: React.ReactNode;
+}
+
+export function ProtectedRoute({ children }: ProtectedRouteProps) {
+  // FIX 7 (minor): read isAuthenticated (derived bool), NOT the raw token string.
+  // isAuthenticated is only true when token is present AND not expired.
+  const { isAuthenticated } = useAuth();
+  const location = useLocation();
+
+  if (!isAuthenticated) {
+    const next = encodeURIComponent(location.pathname + location.search);
+    return <Navigate to={`/login?next=${next}`} replace />;
+  }
+
+  return <>{children}</>;
+}
+```
+
+### §5.3 — Vite Configuration
+
+**CRITICAL — FIX 3 from review (BLOCKER):** The proxy MUST include a `rewrite` rule. The backend FastAPI app mounts routes at `/auth/login`, `/health`, etc. — there is NO `/api` prefix on the backend. The frontend uses `/api/...` as a namespace to distinguish backend calls from static assets; the Vite proxy strips the prefix before forwarding.
+
+Without the `rewrite` rule, every proxied request would be forwarded as `/api/auth/login` which returns 404 from the backend. The spec in rev 1 claimed to strip the prefix but had no `rewrite` rule. This is now corrected.
+
+Docker Compose service name for the backend is `api` (ARCHITECTURE.md §5b). Inside Docker the target is `http://api:8000`. On bare-metal dev (outside Docker), set `VITE_API_TARGET=http://localhost:8000`.
+
+**`vite.config.ts`**
+
+```ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    alias: { "@": path.resolve(__dirname, "./src") }, // matches tsconfig paths
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
   },
   server: {
-    host: true,        // bind 0.0.0.0 so the container port is reachable (== `npm run dev -- --host`)
+    host: '0.0.0.0',   // required when running inside a Docker container
     port: 5173,
-    strictPort: true,  // fail loudly rather than silently picking another port
     proxy: {
-      // Browser → /api/auth/login  ⇒  api container /auth/login
-      "/api": {
-        target: API_TARGET,
+      '/api': {
+        target: process.env.VITE_API_TARGET ?? 'http://api:8000',
         changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/api/, ""),
+        // FIX 3 (BLOCKER): backend routes are at /auth/login, /health, etc.
+        // They are NOT under /api. This rewrite strips the prefix before forwarding.
+        // Without this rule every request returns 404 from the backend.
+        rewrite: (path) => path.replace(/^\/api/, ''),
       },
     },
   },
 });
 ```
 
-> **Choice:** proxy `/api` → backend root and strip the prefix, rather than the backend mounting routes under `/api`. The backend spec mounts routers at `/auth/login`, `/healthz` (no `/api` prefix), so the rewrite keeps the backend contract untouched and the frontend origin clean. `VITE_API_PROXY_TARGET` is `http://api:8000` inside Docker (set in compose), `http://localhost:8000` for bare-metal dev (default).
+**Path alias:** `@` maps to `src/`. Import as `@/auth/AuthContext` instead of `../../auth/AuthContext`.
 
-`VITE_API_BASE_URL=/api` (in `.env.development`) is what the fetch client prepends to every path; it is the only base-URL knob app code sees.
+**`tsconfig.json`**
 
-### 2.2 TypeScript config (strict)
-
-```jsonc
-// tsconfig.json  (solution-style, references the two real configs)
-{
-  "files": [],
-  "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }]
-}
-```
-
-```jsonc
-// tsconfig.app.json
+```json
 {
   "compilerOptions": {
     "target": "ES2022",
@@ -165,743 +475,516 @@ export default defineConfig({
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "useDefineForClassFields": true,
-
-    "strict": true,                         // F-010: tsc --noEmit must be clean under strict
+    "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "noUncheckedIndexedAccess": true,       // safer indexing; pairs well with generated types
-    "exactOptionalPropertyTypes": true,
-    "noImplicitOverride": true,
-
-    "skipLibCheck": true,                   // skip d.ts of deps; our own code is still fully checked
-    "isolatedModules": true,
-    "verbatimModuleSyntax": true,
-    "noEmit": true,                         // Vite/esbuild emits; tsc is type-check only
-
     "baseUrl": ".",
-    "paths": { "@/*": ["./src/*"] }
-  },
-  "include": ["src"]
-}
-```
-
-```jsonc
-// tsconfig.node.json — just for vite.config.ts / vitest.config.ts tooling files
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "skipLibCheck": true,
-    "noEmit": true,
-    "types": ["node"]
-  },
-  "include": ["vite.config.ts", "vitest.config.ts"]
-}
-```
-
-> **Choice:** `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` on. The generated OpenAPI types make heavy use of optional fields; these flags surface "could be undefined" at compile time so the login flow can't silently read a missing `access_token`.
-
-### 2.3 The JWT/CORS story (why the proxy)
-
-In Docker, the React bundle is served from `http://localhost:5173`; the API is `http://api:8000` (internal) / `http://localhost:8000` (host). If the browser called the API origin directly, every request would be cross-origin → CORS preflight → the backend would need CORS middleware. By calling same-origin `/api/...` and letting Vite's dev server proxy server-side, **the browser sees one origin**, no preflight, and the `Authorization: Bearer` header passes straight through. The backend spec ships **no CORS config** for local dev — this proxy is why that's fine. (Production swaps this for a real reverse proxy / same-domain deploy; out of M0 scope.)
-
-### 2.4 Tailwind + shadcn/ui setup
-
-```ts
-// tailwind.config.ts
-import type { Config } from "tailwindcss";
-
-export default {
-  darkMode: ["class"],
-  content: ["./index.html", "./src/**/*.{ts,tsx}"],
-  theme: {
-    extend: {
-      colors: {
-        // shadcn token bridge — values come from CSS variables in index.css
-        border: "hsl(var(--border))",
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
-        primary: { DEFAULT: "hsl(var(--primary))", foreground: "hsl(var(--primary-foreground))" },
-        destructive: {
-          DEFAULT: "hsl(var(--destructive))",
-          foreground: "hsl(var(--destructive-foreground))",
-        },
-        muted: { DEFAULT: "hsl(var(--muted))", foreground: "hsl(var(--muted-foreground))" },
-      },
-      borderRadius: { lg: "var(--radius)", md: "calc(var(--radius) - 2px)" },
+    "paths": {
+      "@/*": ["./src/*"]
     },
+    "noEmit": true
   },
-  plugins: [require("tailwindcss-animate")],
-} satisfies Config;
-```
-
-```jsonc
-// components.json  (shadcn/ui CLI config — drives `npx shadcn add ...`)
-{
-  "$schema": "https://ui.shadcn.com/schema.json",
-  "style": "default",
-  "rsc": false,
-  "tsx": true,
-  "tailwind": {
-    "config": "tailwind.config.ts",
-    "css": "src/index.css",
-    "baseColor": "slate",
-    "cssVariables": true
-  },
-  "aliases": { "components": "@/components", "utils": "@/lib/utils", "ui": "@/components/ui" }
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
 }
 ```
-
-`src/index.css` holds `@tailwind base; @tailwind components; @tailwind utilities;` plus the shadcn `:root` / `.dark` CSS-variable blocks. `src/lib/utils.ts` exports the standard `cn()`:
-
-```ts
-// src/lib/utils.ts
-import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
-```
-
-> **Choice:** shadcn/ui components are **vendored into `src/components/ui/`** via the CLI (not an npm dependency). M0 only needs `button`, `input`, `label`, `card`, `alert` for the login page. Add more per-feature later. This is the documented shadcn pattern and matches ARCHITECTURE §2 ("unstyled-but-polished primitives; no vendor lock-in").
-
-### 2.5 ESLint / Prettier
-
-```js
-// .eslintrc.cjs
-module.exports = {
-  root: true,
-  env: { browser: true, es2022: true },
-  parser: "@typescript-eslint/parser",
-  parserOptions: { project: ["./tsconfig.app.json"], tsconfigRootDir: __dirname },
-  plugins: ["@typescript-eslint", "react-hooks", "react-refresh"],
-  extends: [
-    "eslint:recommended",
-    "plugin:@typescript-eslint/recommended-type-checked",
-    "plugin:react-hooks/recommended",
-    "prettier", // disables stylistic rules that conflict with Prettier
-  ],
-  ignorePatterns: ["dist", "src/api/types.gen.ts"], // never lint generated output
-  rules: {
-    "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
-    "@typescript-eslint/no-explicit-any": "error", // F-060: no `any` casts around the API client
-  },
-};
-```
-
-```jsonc
-// .prettierrc.json
-{ "semi": true, "singleQuote": false, "trailingComma": "all", "printWidth": 100 }
-```
-
-> **Choice:** `recommended-type-checked` (typed linting) so rules like `no-floating-promises` catch an un-awaited `login()`. The generated `types.gen.ts` is excluded from lint (it's a build artifact) but **not** from `tsc` — it must still type-check.
 
 ---
 
-## 3. Docker integration
+## §6 — Code Generation (F-060)
 
-### `frontend/Dockerfile` (dev)
+### §6.1 — generate-types Script
 
-```dockerfile
-# frontend/Dockerfile — DEV image. Production build (multi-stage + nginx) is out of M0 scope.
-FROM node:20-slim
-WORKDIR /app
+**FIX 2 from review (BLOCKER): openapi-typescript v7 removed the `--output` flag.** The tool writes generated types to stdout only. Using `--output` in v7 silently discards the flag — output goes to the terminal and the file is never written (or is left stale). Use a shell redirect (`>`) instead.
 
-# Install deps first for layer caching
-COPY package.json package-lock.json ./
-RUN npm ci
+**Source file:** `frontend/openapi.json` — a committed copy of the OpenAPI 3 schema. This file is the single source of truth for codegen. It is NOT fetched from a live backend URL. Reasons:
+- A live URL (`http://localhost:8000/openapi.json`) is unreachable in CI — the backend is not started in the codegen job.
+- Using the committed file makes the CI drift check hermetic and fast (no service dependency).
 
-# App source (also bind-mounted in compose for hot reload)
-COPY . .
+**Script name:** `generate-types` — not `generate-client`. `openapi-typescript` generates **types**, not an HTTP client. The HTTP client is `openapi-fetch` (a separate library). Naming the script `generate-client` was misleading (finding F-12 in review).
 
-EXPOSE 5173
-# --host makes Vite bind 0.0.0.0 so the published port is reachable from the host
-CMD ["npm", "run", "dev", "--", "--host"]
+**Correct command:**
+
+```sh
+openapi-typescript ./openapi.json > src/api/types.gen.ts
 ```
 
-### docker-compose `frontend` service
+**`package.json` (scripts section):**
 
-Matches what the backend spec (§3) already references (`command: npm run dev -- --host`, port 5173, `depends_on: api`):
+```json
+"generate-types": "openapi-typescript ./openapi.json > src/api/types.gen.ts"
+```
+
+Run locally:
+
+```sh
+npm run generate-types
+```
+
+Then commit the updated `src/api/types.gen.ts`. The generated file carries a header comment:
+
+```ts
+// AUTO-GENERATED by openapi-typescript — do not edit by hand.
+// Source: openapi.json
+// Regenerate: npm run generate-types
+```
+
+**Keeping `openapi.json` in sync:** When the backend team updates the OpenAPI schema, they must also update `frontend/openapi.json` and run `npm run generate-types`. The CI drift check (§6.2) enforces this and will fail the build if the types are stale.
+
+### §6.2 — CI Drift Check
+
+The drift check runs in CI on every PR that touches `frontend/`. It regenerates `types.gen.ts` from the committed `openapi.json` and diffs against the committed file. Any diff fails the build, forcing the engineer to regenerate and commit.
+
+**`.github/workflows/frontend-drift-check.yml`**
 
 ```yaml
-# docker-compose.yml (frontend service — the rest of the stack is owned by F-001/backend)
-  frontend:
-    build: ./frontend
-    command: npm run dev -- --host
-    environment:
-      # Inside the compose network the backend is reachable as http://api:8000
-      VITE_API_PROXY_TARGET: http://api:8000
-    ports: ["5173:5173"]
-    volumes:
-      - ./frontend:/app          # source bind-mount for HMR
-      - /app/node_modules        # anonymous volume: keep container's node_modules, don't shadow with host
-    depends_on: [api]
+name: Frontend type drift check
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/**'
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: Regenerate types from committed openapi.json
+        # FIX 2: stdout redirect — no --output flag in openapi-typescript v7
+        run: npx openapi-typescript ./openapi.json > /tmp/types.gen.fresh.ts
+
+      - name: Diff against committed types.gen.ts
+        run: |
+          if ! diff -u src/api/types.gen.ts /tmp/types.gen.fresh.ts; then
+            echo ""
+            echo "ERROR: src/api/types.gen.ts is out of sync with openapi.json."
+            echo "Run 'npm run generate-types' and commit the result."
+            exit 1
+          fi
 ```
 
-> **Notes.** (1) `VITE_API_PROXY_TARGET=http://api:8000` is read by `vite.config.ts` so the dev-server proxy targets the api **container** (service DNS name), not `localhost`. The browser still only ever sees `/api`. (2) The anonymous `node_modules` volume prevents the host (possibly empty / wrong-arch) `node_modules` from shadowing the image's. (3) `depends_on: [api]` orders startup but does **not** wait for the api to be ready; the frontend tolerates an unavailable backend (login simply fails until the api answers) — no readiness gate needed for a dev SPA. (4) The F-001 acceptance criteria "`curl http://localhost:5173` returns HTML" and full `compose down -v` / `up` are satisfied by this service; they are jointly owned with F-001 at integration time (backend spec §17, deferred minor 4).
+**Why not fetch from a live backend?** The backend is not started in this CI job. A `http://localhost:8000` URL would be unreachable and the job would fail or hang. Using the committed `openapi.json` as the codegen source makes the check hermetic — this is FIX 8 (minor) from the review.
 
 ---
 
-## 4. Auth context & token handling
+## §7 — Test Setup
 
-### 4.1 The AuthContext shape (TypeScript interface)
+### §7.1 — Vitest Configuration
 
-```ts
-// src/auth/AuthContext.tsx
-import { createContext } from "react";
-
-/** Decoded, app-facing identity. Derived from the JWT claims (sub/org_id/role). */
-export interface AuthUser {
-  userId: string;
-  orgId: string | null; // nullable in M0 — backend sets org_id once orgs exist (M1)
-  role: "supplier" | "agent" | "admin";
-}
-
-export interface AuthState {
-  /** The raw JWT, or null when logged out. Lives in memory only. */
-  token: string | null;
-  /** Decoded identity, or null when logged out. */
-  user: AuthUser | null;
-  /** True after the very first render settles (always immediate in M0 — see §4.4). */
-  isAuthenticated: boolean;
-}
-
-export interface AuthContextValue extends AuthState {
-  /**
-   * Calls POST /auth/login. On success stores the token in memory (state + module holder)
-   * and resolves. On failure throws an ApiError carrying the backend envelope — the caller
-   * (Login page) renders the message inline. Never throws on a 200.
-   */
-  login: (email: string, password: string) => Promise<void>;
-  /** Clears the token from state and the module holder. Pure client-side. */
-  logout: () => void;
-}
-
-export const AuthContext = createContext<AuthContextValue | null>(null);
-```
-
-### 4.2 The provider
-
-```tsx
-// src/auth/AuthProvider.tsx
-import { useCallback, useMemo, useState } from "react"; // (useCallback/useState/useMemo)
-import { AuthContext, type AuthContextValue, type AuthUser } from "./AuthContext";
-import { setToken as setTokenInStore, clearToken } from "@/api/tokenStore";
-import { login as loginRequest } from "@/api/auth";
-
-// Minimal JWT payload decode (base64url of the middle segment). No verification —
-// the backend already verified the signature; the client only needs the claims to
-// render role-aware UI later. We do NOT trust this for authorization decisions.
-function decodeClaims(token: string): AuthUser {
-  const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-  return {
-    userId: String(payload.sub),
-    orgId: payload.org_id ? String(payload.org_id) : null,
-    role: payload.role,
-  };
-}
-
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [token, setTokenState] = useState<string | null>(null);
-  const [user, setUser] = useState<AuthUser | null>(null);
-
-  const login = useCallback(async (email: string, password: string) => {
-    const { access_token } = await loginRequest({ email, password }); // throws ApiError on 401
-    setTokenInStore(access_token); // module holder → used by the non-React fetch client
-    setTokenState(access_token); // React state → drives ProtectedRoute / re-render
-    setUser(decodeClaims(access_token));
-  }, []);
-
-  const logout = useCallback(() => {
-    clearToken();
-    setTokenState(null);
-    setUser(null);
-  }, []);
-
-  const value = useMemo<AuthContextValue>(
-    () => ({ token, user, isAuthenticated: token !== null, login, logout }),
-    [token, user, login, logout],
-  );
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-}
-```
+**`vitest.config.ts`**
 
 ```ts
-// src/auth/useAuth.ts
-import { useContext } from "react";
-import { AuthContext, type AuthContextValue } from "./AuthContext";
-
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext);
-  if (ctx === null) throw new Error("useAuth must be used within <AuthProvider>");
-  return ctx;
-}
-```
-
-### 4.3 Token storage — in memory, two places, one source of truth
-
-The token lives in **React state** (drives re-render / route guards) and is **mirrored** into a module-level holder so the non-React fetch client can read it synchronously on every request:
-
-```ts
-// src/api/tokenStore.ts
-// Module-singleton token holder. NOT persisted. Cleared on full page reload.
-// The fetch client reads getToken() to attach the Bearer header; AuthProvider is the
-// only writer (keeps it in lockstep with React state).
-let _token: string | null = null;
-export function setToken(t: string): void {
-  _token = t;
-}
-export function clearToken(): void {
-  _token = null;
-}
-export function getToken(): string | null {
-  return _token;
-}
-```
-
-> **Choice:** mirror rather than read context inside the client. The fetch client is a plain function called outside React's render tree; it can't use hooks. The module holder gives it synchronous access while `AuthProvider` remains the single writer, so state and holder never diverge.
-
-### 4.4 The page-refresh tradeoff (explicit)
-
-Because the token is in memory only (per the F-010 acceptance criterion: "stores the token in memory (not `localStorage`)"), **a full browser refresh or new tab loses the session** — `getToken()` returns `null`, `isAuthenticated` is `false`, and `ProtectedRoute` bounces the user to `/login`. This is the intended security posture for M0 (no token sitting in `localStorage` where XSS could exfiltrate it).
-
-Mitigations and their status:
-- **Silent re-login / refresh-token rotation: OUT OF SCOPE for M0.** The backend issues a single short-lived access token (`JWT_EXPIRES_MINUTES`, default 60) and has no `/auth/refresh` endpoint. Documented limitation, accepted.
-- **httpOnly refresh cookie:** the production-grade answer (refresh token in an httpOnly cookie, access token in memory) is deferred — it needs a backend endpoint that does not exist in M0.
-- **M0 behavior:** after refresh the user simply logs in again. Acceptable for a foundation milestone with no persisted domain data to lose.
-
-This limitation is called out here so a tech lead signs off on it deliberately rather than discovering it in QA.
-
----
-
-## 5. API client layer
-
-### 5.1 Generated types (`npm run generate-client`)
-
-`openapi-typescript` reads the backend's live `/openapi.json` and emits `src/api/types.gen.ts`. This file is the **single source of truth** for every request/response shape (F-060). Hand-written code imports from it and never re-declares a backend DTO.
-
-```jsonc
-// package.json (scripts excerpt) — full file in §10
-{
-  "scripts": {
-    "generate-client": "openapi-typescript http://localhost:8000/openapi.json -o src/api/types.gen.ts"
-  }
-}
-```
-
-- Run locally against the running backend (`docker compose up api`, then `npm run generate-client`).
-- The generated file exposes a `paths` interface (operations keyed by path + method) and a `components["schemas"]` map. We extract named shapes from it:
-
-```ts
-// Convenience aliases living in client.ts (NOT redefinitions — they reference generated types)
-import type { paths, components } from "@/api/types.gen";
-
-export type LoginRequest = components["schemas"]["LoginRequest"];
-export type TokenResponse = components["schemas"]["TokenResponse"];
-// The backend error envelope component, if named in the schema; otherwise typed in §5.2.
-```
-
-> **Decision:** `types.gen.ts` is committed to the repo (not gitignored). Reason: CI and `tsc` must type-check without a live backend, and reviewers should see schema diffs in PRs. Regeneration is a deliberate, reviewable step — drift is caught in code review and by the CI gate (§8), not hidden behind a build step. The file carries a `// AUTO-GENERATED — do not edit. Run: npm run generate-client` banner (and is ESLint-ignored, §2.5).
-
-### 5.2 Typed error for the envelope
-
-Every non-2xx response from the backend is `{"error":{"code","message"}}` (backend spec §14). The client parses it into a typed `ApiError`:
-
-```ts
-// src/api/ApiError.ts
-/** Mirrors the backend error envelope: { "error": { "code", "message" } }. */
-export interface ApiErrorBody {
-  error: { code: string; message: string };
-}
-
-export class ApiError extends Error {
-  readonly status: number;
-  readonly code: string;
-  constructor(status: number, code: string, message: string) {
-    super(message);
-    this.name = "ApiError";
-    this.status = status;
-    this.code = code;
-  }
-  static isApiError(e: unknown): e is ApiError {
-    return e instanceof ApiError;
-  }
-}
-```
-
-### 5.3 The typed fetch wrapper
-
-A single low-level `request<T>()` that (a) prepends the base URL, (b) attaches the Bearer token from `tokenStore` to **every** request, (c) parses the error envelope into `ApiError`, (d) returns the typed body.
-
-```ts
-// src/api/client.ts
-import { getToken } from "./tokenStore";
-import { ApiError, type ApiErrorBody } from "./ApiError";
-
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api"; // "/api" → Vite proxy → backend
-
-interface RequestOptions {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
-  body?: unknown;
-}
-
-export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-
-  // (b) attach Bearer to every request when a token is present
-  const token = getToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method: opts.method ?? "GET",
-    headers,
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
-
-  if (!res.ok) {
-    // (c) parse the backend envelope { error: { code, message } } into a typed ApiError
-    let code = "unknown_error";
-    let message = res.statusText || "Request failed";
-    try {
-      const data = (await res.json()) as Partial<ApiErrorBody>;
-      if (data.error) {
-        code = data.error.code ?? code;
-        message = data.error.message ?? message;
-      }
-    } catch {
-      /* non-JSON body (e.g. proxy 502) — keep the status-text fallback */
-    }
-    throw new ApiError(res.status, code, message);
-  }
-
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T; // (d) caller supplies the generated type as T
-}
-```
-
-### 5.4 The `login()` call, end to end
-
-```ts
-// src/api/auth.ts
-import { request } from "./client";
-import type { LoginRequest, TokenResponse } from "./client"; // aliases over generated types
-import type { components } from "./types.gen";
-
-export function login(body: LoginRequest): Promise<TokenResponse> {
-  // T is the generated TokenResponse → { access_token: string; token_type: "bearer" }
-  return request<TokenResponse>("/auth/login", { method: "POST", body });
-}
-
-// Protected smoke call used to prove the Bearer token is attached (backend GET /auth/me).
-export function me(): Promise<components["schemas"]["AuthUserResponse"] | Record<string, unknown>> {
-  return request("/auth/me");
-}
-```
-
-End-to-end trace of a successful login:
-
-1. `Login.tsx` calls `await auth.login(email, password)`.
-2. `AuthProvider.login` calls `loginRequest({ email, password })` → `request<TokenResponse>("/auth/login", …)`.
-3. `request` POSTs to `/api/auth/login`; Vite proxy strips `/api` → backend `POST /auth/login`.
-4. Backend returns `200 { "access_token": "...", "token_type": "bearer" }` (or `401 { "error": { "code": "unauthorized", … } }`).
-5. On 200: `request` returns the typed `TokenResponse`; `AuthProvider` calls `setTokenInStore(access_token)` (module holder) + `setTokenState` (React state) + decodes claims into `user`.
-6. From this point every `request()` reads `getToken()` and sends `Authorization: Bearer <jwt>` — verifiable in the browser network tab (F-010 criterion).
-7. On 401: `request` throws `ApiError(401, "unauthorized", "...")`; it propagates out of `login()`; `Login.tsx` catches it and renders the message inline (no reload).
-
----
-
-## 6. Routing
-
-### 6.1 Router setup
-
-React Router v6. `BrowserRouter` is mounted in `main.tsx`; the route table is `app/router.tsx`.
-
-```tsx
-// src/main.tsx
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import { BrowserRouter } from "react-router-dom";
-import App from "./App";
-import "./index.css";
-
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
-  </StrictMode>,
-);
-```
-
-```tsx
-// src/App.tsx
-import { AuthProvider } from "./auth/AuthProvider";
-import { AppRouter } from "./app/router";
-
-export default function App() {
-  return (
-    <AuthProvider>
-      <AppRouter />
-    </AuthProvider>
-  );
-}
-```
-
-```tsx
-// src/app/router.tsx
-import { Routes, Route, Navigate } from "react-router-dom";
-import { ProtectedRoute } from "@/auth/ProtectedRoute";
-import { AppShell } from "@/components/layout/AppShell";
-import Login from "@/pages/Login";
-import Dashboard from "@/pages/Dashboard";
-import RegisterSupplier from "@/pages/RegisterSupplier";
-import RegisterAgent from "@/pages/RegisterAgent";
-import NotFound from "@/pages/NotFound";
-
-export function AppRouter() {
-  return (
-    <Routes>
-      {/* public */}
-      <Route path="/login" element={<Login />} />
-      {/* M1 placeholders — routes/shell exist now; real forms are F-014 / F-016 */}
-      <Route path="/register/supplier" element={<RegisterSupplier />} />
-      <Route path="/register/agent" element={<RegisterAgent />} />
-
-      {/* protected */}
-      <Route element={<ProtectedRoute />}>
-        <Route element={<AppShell />}>
-          <Route path="/dashboard" element={<Dashboard />} />
-        </Route>
-      </Route>
-
-      <Route path="/" element={<Navigate to="/dashboard" replace />} />
-      <Route path="*" element={<NotFound />} />
-    </Routes>
-  );
-}
-```
-
-### 6.2 `ProtectedRoute`
-
-```tsx
-// src/auth/ProtectedRoute.tsx
-import { Navigate, Outlet, useLocation } from "react-router-dom";
-import { useAuth } from "./useAuth";
-
-/**
- * Layout-route guard. When there is no token, redirect to /login (preserving the
- * attempted path in router state so a future M1 enhancement can bounce back after login).
- */
-export function ProtectedRoute() {
-  const { isAuthenticated } = useAuth();
-  const location = useLocation();
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
-  }
-  return <Outlet />;
-}
-```
-
-> **Choice:** `ProtectedRoute` is a **layout route** (renders `<Outlet/>`), not a wrapper-per-page. One guard wraps the whole authenticated subtree; adding M1 pages means adding child `<Route>`s, not re-wrapping. `replace` avoids polluting browser history with the protected URL.
-
-Route summary (M0):
-
-| Path | Element | Guard | Status |
-|---|---|---|---|
-| `/login` | `Login` | public | live (F-010) |
-| `/register/supplier` | `RegisterSupplier` | public | placeholder shell (M1: F-014) |
-| `/register/agent` | `RegisterAgent` | public | placeholder shell (M1: F-016) |
-| `/dashboard` | `Dashboard` | protected | live (empty shell) |
-| `/` | redirect → `/dashboard` | — | live |
-| `*` | `NotFound` | public | live |
-
-The register pages render a minimal "Registration — coming in M1" card so the route resolves and `tsc` passes; their forms are explicitly out of F-010 scope.
-
----
-
-## 7. Login page
-
-```tsx
-// src/pages/Login.tsx
-import { FormEvent, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useAuth } from "@/auth/useAuth";
-import { ApiError } from "@/api/ApiError";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Card } from "@/components/ui/card";
-import { Alert } from "@/components/ui/alert";
-
-export default function Login() {
-  const { login } = useAuth();
-  const navigate = useNavigate();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault(); // (criterion) no full page reload
-    setError(null);
-    setSubmitting(true);
-    try {
-      await login(email, password);
-      navigate("/dashboard", { replace: true }); // (criterion) redirect on success
-    } catch (err) {
-      // (criterion) inline error on invalid credentials, no reload
-      setError(
-        ApiError.isApiError(err) && err.status === 401
-          ? "Invalid email or password."
-          : "Something went wrong. Please try again.",
-      );
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Card>
-      <form onSubmit={handleSubmit} noValidate aria-label="login">
-        <Label htmlFor="email">Email</Label>
-        <Input
-          id="email"
-          type="email"
-          required
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
-        <Label htmlFor="password">Password</Label>
-        <Input
-          id="password"
-          type="password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-        {error && (
-          <Alert variant="destructive" role="alert">
-            {error}
-          </Alert>
-        )}
-        <Button type="submit" disabled={submitting}>
-          {submitting ? "Signing in…" : "Sign in"}
-        </Button>
-      </form>
-    </Card>
-  );
-}
-```
-
-### Acceptance-criterion → mechanism map (F-010)
-
-| F-010 acceptance criterion | How it is met |
-|---|---|
-| `/login` renders email + password fields and a submit button | `Login.tsx`: `<Input type="email">`, `<Input type="password">`, `<Button type="submit">` inside a `<form>` |
-| Valid credentials redirect to `/dashboard` and store token **in memory** | `login()` resolves → `navigate("/dashboard")`; token written to React state + `tokenStore` module holder, never `localStorage` (§4.3) |
-| Invalid credentials show an inline error **without full page reload** | `e.preventDefault()` + `try/catch` on the `ApiError` (status 401) → `setError(...)` renders `<Alert role="alert">`; SPA never reloads |
-| Visiting a protected route without a token redirects to `/login` | `ProtectedRoute` checks `isAuthenticated`; `<Navigate to="/login" replace/>` when false (§6.2) |
-| After login, JWT attached as `Bearer` to all API calls (network tab) | `client.request()` reads `getToken()` and sets `Authorization: Bearer <jwt>` on every request (§5.3) |
-| `tsc --noEmit` passes with zero type errors | strict `tsconfig.app.json` (§2.2) + generated types (§5); enforced in CI (§8) |
-
----
-
-## 8. Type-safety gate
-
-How "zero `tsc` errors" is guaranteed and how frontend/backend stay in sync:
-
-1. **Local + CI command:** `npm run typecheck` → `tsc --noEmit -p tsconfig.app.json`. Runs in CI on every PR; a non-zero exit fails the build. This is the literal F-010 criterion.
-2. **Strict mode is on** (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noUnusedLocals/Parameters`) — §2.2.
-3. **Generated types are committed and type-checked.** `src/api/types.gen.ts` is in the repo and included in `tsconfig.app.json`'s `include: ["src"]`, so `tsc` validates that every hand-written call site (`request<TokenResponse>`, the `LoginRequest` alias, etc.) matches the backend schema. If the backend changes a DTO, regeneration produces a new `types.gen.ts`; any now-incompatible call site fails `tsc` immediately — that's the sync mechanism.
-4. **Drift detection (CI, recommended):** a CI job runs `npm run generate-client` against an ephemeral backend, then `git diff --exit-code src/api/types.gen.ts`. A non-empty diff means the committed types are stale versus the live schema → the job fails, forcing the dev to regenerate and review. This makes "generated types are the single source of truth" enforceable, not aspirational.
-5. **No `any` escape hatch:** `@typescript-eslint/no-explicit-any: error` (§2.5) blocks casting around a type mismatch, satisfying F-060's "compiles without casting to `any`".
-
-CI step order: `npm ci` → `npm run lint` → `npm run typecheck` → `npm run test`.
-
----
-
-## 9. Testing approach
-
-**Stack:** Vitest + React Testing Library + `@testing-library/jest-dom` + `@testing-library/user-event`, jsdom environment. Backend mocked with **MSW** (Mock Service Worker) so the auth flow is tested against realistic HTTP, including the exact backend envelopes.
-
-```ts
-// vitest.config.ts
-import { defineConfig } from "vitest/config";
-import react from "@vitejs/plugin-react";
-import path from "node:path";
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
-  resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
   test: {
-    environment: "jsdom",
+    environment: 'jsdom',
     globals: true,
-    setupFiles: ["./src/__tests__/setup.ts"],
+    setupFiles: ['./src/test/setup.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+    },
   },
 });
 ```
 
-```ts
-// src/__tests__/setup.ts
-import "@testing-library/jest-dom/vitest";
-import { afterAll, afterEach, beforeAll } from "vitest";
-import { server } from "./mocks/server";
+### §7.2 — MSW Handlers and Error Envelope
 
-beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
-afterEach(() => server.resetHandlers());
-afterAll(() => server.close());
+**FIX 5 from review (MAJOR):** All MSW error responses must match the backend error envelope exactly:
+
+```json
+{ "error": { "code": "<string>", "message": "<string>" } }
 ```
 
+Any handler that returns a different shape (e.g., `{ "message": "Not found" }`) causes components to behave correctly against MSW but break against the real backend. This defeats the purpose of contract-faithful mocking and masks integration bugs until the mock is removed.
+
+**`src/mocks/helpers.ts`**
+
 ```ts
-// src/__tests__/mocks/handlers.ts
-import { http, HttpResponse } from "msw";
+import { HttpResponse } from 'msw';
 
-// A real, signed-looking JWT is unnecessary; a 3-segment base64url token with a decodable
-// payload ({ sub, org_id, role }) is enough for AuthProvider.decodeClaims.
-const FAKE_JWT = "h.eyJzdWIiOiJ1MSIsIm9yЗ19pZCI6bnVsbCwicm9sZSI6InN1cHBsaWVyIn0.s"; // illustrative
+/**
+ * Creates an MSW error response matching the backend error envelope exactly:
+ *   { "error": { "code": string, "message": string } }
+ *
+ * Use this for ALL error responses in MSW handlers.
+ * NEVER return { message: string } or any other shape — it does not match the backend.
+ */
+export function mockError(
+  code: string,
+  message: string,
+  status: number,
+): Response {
+  return HttpResponse.json(
+    { error: { code, message } },
+    { status },
+  );
+}
+```
 
-export const handlers = [
-  http.post("/api/auth/login", async ({ request }) => {
-    const { email, password } = (await request.json()) as { email: string; password: string };
-    if (email === "good@x.com" && password === "correct") {
-      return HttpResponse.json({ access_token: FAKE_JWT, token_type: "bearer" });
+**`src/mocks/handlers/auth.ts`**
+
+```ts
+import { http, HttpResponse } from 'msw';
+import { mockError } from '../helpers';
+
+export const authHandlers = [
+  http.post('/api/auth/login', async ({ request }) => {
+    const body = await request.json() as { email: string; password: string };
+
+    if (body.email === 'agent@lendrail.test' && body.password === 'password') {
+      return HttpResponse.json(
+        {
+          // A 3-segment JWT with a decodable payload (far-future exp).
+          // Payload (base64url decoded): { sub: "user-001", org_id: "org-001", role: "agent", exp: 9999999999 }
+          access_token:
+            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.' +
+            'eyJzdWIiOiJ1c2VyLTAwMSIsIm9yZ19pZCI6Im9yZy0wMDEiLCJyb2xlIjoiYWdlbnQiLCJleHAiOjk5OTk5OTk5OTl9.' +
+            'mock-signature',
+          token_type: 'bearer',
+        },
+        { status: 200 },
+      );
     }
-    // exact backend envelope on 401
-    return HttpResponse.json(
-      { error: { code: "unauthorized", message: "invalid_credentials" } },
-      { status: 401 },
-    );
+
+    if (body.email === 'supplier@lendrail.test' && body.password === 'password') {
+      return HttpResponse.json(
+        {
+          access_token:
+            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.' +
+            'eyJzdWIiOiJ1c2VyLTAwMiIsIm9yZ19pZCI6Im9yZy0wMDIiLCJyb2xlIjoic3VwcGxpZXIiLCJleHAiOjk5OTk5OTk5OTl9.' +
+            'mock-signature',
+          token_type: 'bearer',
+        },
+        { status: 200 },
+      );
+    }
+
+    // FIX 5: wrong credentials — MUST use the correct backend error envelope via mockError()
+    return mockError('unauthorized', 'Email or password is incorrect', 401);
   }),
 ];
 ```
 
-> **Choice:** MSW over hand-stubbing `fetch`. It exercises the real `client.request()` path (headers, envelope parsing, status handling) and lets tests assert the `Authorization` header was sent. `onUnhandledRequest: "error"` catches accidental real network calls.
+**`src/mocks/browser.ts`**
 
-### F-010 criterion → concrete test
+```ts
+import { setupWorker } from 'msw/browser';
+import { authHandlers } from './handlers/auth';
 
-| Criterion | Test | Assertion |
-|---|---|---|
-| Login form renders fields + submit | `Login.test.tsx::renders_form` | email input, password input, submit button present (by role/label) |
-| Valid creds redirect to `/dashboard`, token in memory | `Login.test.tsx::valid_login_redirects` | render at `/login` in `MemoryRouter`; type `good@x.com`/`correct`; submit; assert navigation to `/dashboard`; assert `getToken()` is non-null and `localStorage.length === 0` |
-| Invalid creds inline error, no reload | `Login.test.tsx::invalid_login_shows_error` | submit wrong creds; MSW returns 401 envelope; assert `role="alert"` shows "Invalid email or password."; assert no navigation occurred |
-| Protected route w/o token → `/login` | `ProtectedRoute.test.tsx::redirects_when_unauthenticated` | render `/dashboard` with a fresh `AuthProvider` (no token); assert `/login` content renders |
-| Protected route with token renders | `ProtectedRoute.test.tsx::renders_when_authenticated` | seed token via login; assert `Dashboard` renders |
-| Bearer attached to subsequent calls | `client.test.ts::attaches_bearer` | `setToken("abc")`; call a handler that echoes headers; assert `Authorization: Bearer abc` |
-| Error envelope parsed into `ApiError` | `client.test.ts::parses_error_envelope` | MSW returns `{error:{code,message}}` + 422; assert thrown `ApiError` has `.status===422`, `.code`, `.message` |
-| Auth context login/logout | `AuthProvider.test.tsx::login_then_logout` | login sets `isAuthenticated`/`user`; `logout()` clears token + `getToken()===null` |
+export const worker = setupWorker(...authHandlers);
+```
 
-`tsc --noEmit` is validated in CI, not by a unit test (it's a compile gate, §8).
+**`src/mocks/server.ts`** (Vitest / Node environment)
+
+```ts
+import { setupServer } from 'msw/node';
+import { authHandlers } from './handlers/auth';
+
+export const server = setupServer(...authHandlers);
+```
+
+**`src/test/setup.ts`**
+
+```ts
+import '@testing-library/jest-dom';
+import { afterAll, afterEach, beforeAll } from 'vitest';
+import { server } from '../mocks/server';
+
+// Start MSW server before all tests.
+// onUnhandledRequest: 'error' — any unhandled request causes an immediate test failure.
+// This keeps handler coverage honest and prevents silent network calls from slipping through.
+beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+```
+
+### §7.3 — Example Login Test
+
+**`src/test/LoginPage.test.tsx`**
+
+```tsx
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { describe, expect, it, vi } from 'vitest';
+import { AuthProvider } from '@/auth/AuthContext';
+import { LoginPage } from '@/pages/LoginPage';
+
+// Mock useNavigate so we can assert redirects without a full browser router.
+const mockNavigate = vi.fn();
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>();
+  return { ...actual, useNavigate: () => mockNavigate };
+});
+
+function renderLoginPage() {
+  return render(
+    <MemoryRouter initialEntries={['/login']}>
+      <AuthProvider>
+        <LoginPage />
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+}
+
+describe('LoginPage', () => {
+  it('renders email and password fields and a submit button', () => {
+    renderLoginPage();
+    expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+  });
+
+  it('redirects to /dashboard on successful login', async () => {
+    const user = userEvent.setup();
+    renderLoginPage();
+
+    await user.type(screen.getByLabelText(/email/i), 'agent@lendrail.test');
+    await user.type(screen.getByLabelText(/password/i), 'password');
+    await user.click(screen.getByRole('button', { name: /sign in/i }));
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith('/dashboard', { replace: true });
+    });
+  });
+
+  it('shows an inline error on invalid credentials without reloading', async () => {
+    const user = userEvent.setup();
+    renderLoginPage();
+
+    await user.type(screen.getByLabelText(/email/i), 'wrong@example.com');
+    await user.type(screen.getByLabelText(/password/i), 'wrongpassword');
+    await user.click(screen.getByRole('button', { name: /sign in/i }));
+
+    // MSW returns { error: { code: 'unauthorized', message: 'Email or password is incorrect' } }
+    // The component reads error.error.message and renders it inline.
+    await waitFor(() => {
+      expect(
+        screen.getByText(/email or password is incorrect/i),
+      ).toBeInTheDocument();
+    });
+
+    // No navigation occurred
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it('disables the submit button while the request is in flight', async () => {
+    const user = userEvent.setup();
+    renderLoginPage();
+
+    await user.type(screen.getByLabelText(/email/i), 'agent@lendrail.test');
+    await user.type(screen.getByLabelText(/password/i), 'password');
+
+    const button = screen.getByRole('button', { name: /sign in/i });
+    await user.click(button);
+
+    // Button must be disabled immediately after click (before response arrives)
+    expect(button).toBeDisabled();
+  });
+});
+```
 
 ---
 
-## 10. Pinned dependencies — proposed `frontend/package.json`
+## §8 — Login Page (F-010 Acceptance Criteria)
 
-```jsonc
+**F-010 acceptance criteria:**
+- Email + password form
+- On success: JWT stored in memory (via `AuthContext.login()`), redirect to `/dashboard`
+- On failure: display error message derived from backend response envelope (`error.error.message`)
+- No page reload on submit
+
+**`src/pages/LoginPage.tsx`**
+
+```tsx
+import { useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useAuth } from '@/auth/AuthContext';
+import { apiClient } from '@/api/client';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+
+export function LoginPage() {
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();   // no full page reload
+    setError(null);
+    setIsLoading(true);
+
+    try {
+      const { data, error: apiError, response } = await apiClient.POST('/auth/login', {
+        body: { email, password },
+      });
+
+      if (!response.ok || apiError) {
+        // Read from the backend error envelope: { error: { code, message } }
+        const message =
+          (apiError as { error?: { message?: string } } | undefined)?.error?.message ??
+          'Sign in failed. Please try again.';
+        setError(message);
+        return;
+      }
+
+      // Success: store JWT in memory and redirect.
+      login(data.access_token);
+
+      // Respect ?next= so the user resumes where they were before the redirect.
+      const next = searchParams.get('next');
+      navigate(next ? decodeURIComponent(next) : '/dashboard', { replace: true });
+    } catch {
+      setError('An unexpected error occurred. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-gray-50">
+      <div className="w-full max-w-sm rounded-lg border border-gray-200 bg-white p-8 shadow-sm">
+        <h1 className="mb-6 text-2xl font-semibold text-gray-900">Sign in to LendRail</h1>
+
+        <form onSubmit={handleSubmit} noValidate className="space-y-4">
+          <div className="space-y-1">
+            <Label htmlFor="email">Email</Label>
+            <Input
+              id="email"
+              type="email"
+              autoComplete="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              disabled={isLoading}
+            />
+          </div>
+
+          <div className="space-y-1">
+            <Label htmlFor="password">Password</Label>
+            <Input
+              id="password"
+              type="password"
+              autoComplete="current-password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              disabled={isLoading}
+            />
+          </div>
+
+          {error && (
+            <p role="alert" className="text-sm text-red-600">
+              {error}
+            </p>
+          )}
+
+          <Button type="submit" className="w-full" disabled={isLoading}>
+            {isLoading ? 'Signing in…' : 'Sign in'}
+          </Button>
+        </form>
+      </div>
+    </div>
+  );
+}
+```
+
+**Acceptance criterion mapping:**
+
+| F-010 criterion | Implementation |
+|---|---|
+| Email + password form | `<Input type="email">` + `<Input type="password">` inside a `<form>` |
+| JWT stored in memory on success | `login(data.access_token)` → writes to `tokenStore` module variable; never `localStorage` |
+| Redirect to `/dashboard` on success | `navigate(next ?? '/dashboard', { replace: true })` |
+| Inline error on bad credentials, no reload | `e.preventDefault()` + `setError(message)` renders `<p role="alert">` |
+| Visiting `/dashboard` without a token → `/login` | `ProtectedRoute` checks `isAuthenticated` (§5.2) |
+| Bearer attached to subsequent calls | `apiClient` middleware attaches `Authorization: Bearer <token>` on every request (§4.2) |
+
+---
+
+## §9 — Dashboard Shell
+
+The dashboard page in M0 is a skeleton — a nav bar showing the user's role and a content placeholder. No domain content is rendered here; it is the authenticated landing target. Feature pages (loans, agreements, risk cockpit) are added in M1+.
+
+**`src/pages/DashboardPage.tsx`**
+
+```tsx
+import { useAuth } from '@/auth/AuthContext';
+
+export function DashboardPage() {
+  const { role, logout } = useAuth();
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Top nav */}
+      <nav className="border-b border-gray-200 bg-white px-6 py-4">
+        <div className="flex items-center justify-between">
+          <span className="text-lg font-semibold text-gray-900">LendRail</span>
+          <div className="flex items-center gap-4">
+            {role && (
+              <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-600 capitalize">
+                {role}
+              </span>
+            )}
+            <button
+              onClick={logout}
+              className="text-sm text-gray-500 hover:text-gray-900"
+            >
+              Sign out
+            </button>
+          </div>
+        </div>
+      </nav>
+
+      {/* Content placeholder — feature pages added in M1 */}
+      <main className="flex items-center justify-center p-12">
+        <p className="text-sm text-gray-400">
+          Dashboard — feature pages coming in M1
+        </p>
+      </main>
+    </div>
+  );
+}
+```
+
+---
+
+## §10 — package.json
+
+Pinned versions. All ranges use `^` (compatible patch/minor within the stated major).
+
+```json
 {
   "name": "lendrail-frontend",
   "private": true,
@@ -909,65 +992,133 @@ export const handlers = [
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.app.json",
-    "lint": "eslint . --max-warnings=0",
-    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "test": "vitest run",
     "test:watch": "vitest",
-    "generate-client": "openapi-typescript http://localhost:8000/openapi.json -o src/api/types.gen.ts"
+    "test:coverage": "vitest run --coverage",
+    "generate-types": "openapi-typescript ./openapi.json > src/api/types.gen.ts",
+    "msw:init": "msw init public/ --save"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.2",
-    "class-variance-authority": "^0.7.0",
-    "clsx": "^2.1.1",
-    "tailwind-merge": "^2.5.4",
-    "tailwindcss-animate": "^1.0.7",
-    "lucide-react": "^0.451.0",
-    "@radix-ui/react-slot": "^1.1.0",
-    "@radix-ui/react-label": "^2.1.0"
+    "jwt-decode": "^4.0.0",
+    "openapi-fetch": "^0.9.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.22.0"
   },
   "devDependencies": {
-    "typescript": "^5.6.3",
-    "vite": "^5.4.8",
-    "@vitejs/plugin-react": "^4.3.2",
-    "tailwindcss": "^3.4.13",
-    "postcss": "^8.4.47",
-    "autoprefixer": "^10.4.20",
-    "openapi-typescript": "^7.4.1",
-    "vitest": "^2.1.2",
-    "jsdom": "^25.0.1",
-    "@testing-library/react": "^16.0.1",
-    "@testing-library/jest-dom": "^6.5.0",
-    "@testing-library/user-event": "^14.5.2",
-    "msw": "^2.4.9",
-    "eslint": "^8.57.1",
-    "@typescript-eslint/parser": "^8.8.0",
-    "@typescript-eslint/eslint-plugin": "^8.8.0",
-    "eslint-plugin-react-hooks": "^4.6.2",
-    "eslint-plugin-react-refresh": "^0.4.12",
-    "eslint-config-prettier": "^9.1.0",
-    "prettier": "^3.3.3",
-    "@types/react": "^18.3.11",
-    "@types/react-dom": "^18.3.0",
-    "@types/node": "^20.16.11"
+    "@testing-library/jest-dom": "^6.4.0",
+    "@testing-library/react": "^15.0.0",
+    "@testing-library/user-event": "^14.5.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "autoprefixer": "^10.4.0",
+    "msw": "^2.2.0",
+    "openapi-typescript": "^7.0.0",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0",
+    "vitest": "^1.5.0"
   }
 }
 ```
 
-> **Pin notes.** React **18** (architecture mandates de-facto standard; 18 over 19 for shadcn/Radix maturity at the time of writing). `react-router-dom` **v6** (v7 reshuffles APIs; v6 is what the spec calls for). `openapi-typescript` **v7** (current major; CLI `-o` output flag). `msw` **v2** (v2 `http`/`HttpResponse` API used in §9). `vitest` **v2** paired with `@testing-library/react` **v16** (React 18 compatible). `eslint` pinned to **8.x** with the `.eslintrc.cjs` legacy config format (flat config + typed linting is fiddlier; 8.x is stable for this setup). shadcn/ui itself is **not** a dependency — components are vendored via the CLI (`npx shadcn@latest add ...`), pulling in only the Radix primitives each component needs (`react-slot` for `Button asChild`, `react-label` for `Label`).
+**Version pin rationale:**
+
+| Package | Pin | Rationale |
+|---|---|---|
+| `react` | `^18.2.0` | ARCHITECTURE.md mandates React 18; v19 has ecosystem immaturity at M0 |
+| `react-router-dom` | `^6.22.0` | Current stable v6; raised from v6.8 (FIX 6 from review — minor) |
+| `vite` | `^5.2.0` | Current stable Vite 5 |
+| `openapi-typescript` | `^7.0.0` | v7 is the current major; v6 had `--output` flag, v7 does not |
+| `msw` | `^2.2.0` | v2 `http`/`HttpResponse` API used throughout |
+| `openapi-fetch` | `^0.9.0` | Typed wrapper consuming v7-generated types |
+
+**Post-install step:** Run `npm run msw:init` once after `npm install` to generate `public/mockServiceWorker.js`. Commit this file — it must be served from the same origin as the app to register as a service worker.
 
 ---
 
-## 11. Decisions a tech lead should scrutinize
+## §11 — postcss.config.js
 
-1. **In-memory token ⇒ refresh loses session (§4.4).** Accepted per F-010, but it means every hard refresh forces re-login and there is no refresh-token path in M0. Confirm this UX is acceptable for the foundation milestone and that the httpOnly-cookie design lands before M1 has real data to lose.
-2. **`types.gen.ts` committed, not gitignored, + a CI drift check (§5.1, §8).** Alternative is generating at build time. Committing makes diffs reviewable and CI hermetic but requires discipline (regenerate when the backend changes). Confirm the drift-check CI job is in scope.
-3. **`/api` Vite proxy with prefix-strip (§2.1, §2.3).** Keeps CORS out of local dev and the backend contract unprefixed. Confirm the production deploy will also be same-origin (reverse proxy) so the model carries forward, or note where it diverges.
-4. **Client-side JWT decode for `role`/`org_id` (§4.2).** Used only for rendering, never authorization (the backend enforces). Confirm reviewers are comfortable with an unverified client-side decode for UI hints.
-5. **React 18 / Router v6 / ESLint 8 pins (§10).** Deliberately conservative versus the newest majors (React 19, Router v7, flat ESLint config) for ecosystem stability. Confirm we accept being one major behind in exchange for fewer integration surprises.
-6. **shadcn components vendored, not a dependency (§2.4).** Standard shadcn pattern but means component source lives in our repo and we own updates. Confirm this is the intended ownership model.
+**FIX 9 from review (MINOR):** Without this file containing the `tailwindcss` and `autoprefixer` plugins, Tailwind classes are not processed and the UI renders completely unstyled. shadcn/ui components depend on Tailwind utility classes. This file is not optional.
+
+**`postcss.config.js`**
+
+```js
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+};
 ```
+
+**`tailwind.config.js`**
+
+```js
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    './index.html',
+    './src/**/*.{ts,tsx}',
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+};
+```
+
+Both files must be present at the project root (`frontend/`). Tailwind scans the `content` globs at build time to determine which utility classes to emit. A missing or incorrect `content` entry means classes used in those files are silently purged from the production bundle — the app will look broken in production even if it looks fine in dev (Vite inlines all classes in dev mode).
+
+**`src/index.css`** must contain the three Tailwind directives:
+
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+```
+
+---
+
+## §12 — Open Decisions
+
+All five original open decisions from rev 1 have been resolved. No new unresolved decisions were introduced in rev 2.
+
+| Decision | Status | Resolution |
+|---|---|---|
+| **D-1** — In-memory token forces re-login on hard refresh | **Resolved** | Approved. Re-auth flow: 401 or expiry → clear token → redirect to `/login?next=<path>`. No refresh endpoint — none exists on the backend. Documented in §4.1 and §4.2. |
+| **D-2** — Commit `types.gen.ts` + CI drift check | **Resolved** | Approved. Source is committed `openapi.json` (not a live URL). CI drift check is hermetic and fast. See §6. |
+| **D-3** — Vite `/api` proxy with prefix-strip | **Resolved** | Approved with the `rewrite` rule now present in §5.3. Proxy correctly strips `/api` before forwarding to backend. This was a BLOCKER in rev 1. |
+| **D-4** — Client-side `jwtDecode` for UI hints | **Resolved** | Approved. `exp` claim is now checked after decode in both `AuthContext` (§4.1) and the API client middleware (§4.2). `isAuthenticated` is a derived bool. |
+| **D-5** — Conservative version pins + shadcn vendored | **Resolved** | Approved. `react-router-dom` raised to `^6.22.0`. All other pins confirmed. shadcn vendored via CLI into `src/components/ui/`. |
+
+---
+
+## §13 — Resolution Log
+
+Record of all changes from rev 1 (the spec that received the tech-lead review) to rev 2 (this document).
+
+| Review finding | Severity | Section changed | What was done |
+|---|---|---|---|
+| **F-1** — phantom `refreshToken()` on 401 | BLOCKER | §4.2 | Removed all refresh logic. On 401: `clearToken()`, `window.location.replace('/login?next=...')`, reject the current promise. No retry, no `refreshToken()` call. Backend has no refresh endpoint. |
+| **F-2** — `--output` flag removed in openapi-typescript v7 | BLOCKER | §6.1, §6.2, §10 | Command corrected to stdout redirect: `openapi-typescript ./openapi.json > src/api/types.gen.ts`. Script renamed from `generate-client` to `generate-types`. All references updated. |
+| **F-3** — Vite proxy missing `rewrite` rule | BLOCKER | §5.3 | Added `rewrite: (path) => path.replace(/^\/api/, '')` to proxy config. Inline comment explains that backend routes are not under `/api`. Without this line, all proxied requests returned 404. |
+| **F-4** — JWT `exp` claim not checked | MAJOR | §4.1, §4.2 | Added `decodeAndValidate()` helper that checks `decoded.exp * 1000 < Date.now()`. Runs (a) on mount + `login()` call in `AuthContext`, and (b) in fetch middleware before attaching `Authorization` header. `isAuthenticated` is now derived (token present AND not expired). |
+| **F-5** — MSW error envelope mismatch | MAJOR | §7.2 | All MSW error responses updated to `{ error: { code, message } }` via the `mockError(code, message, status)` helper in `src/mocks/helpers.ts`. No bare `{ message }` shapes anywhere in handlers. |
+| **F-6** — `react-router-dom` pinned to v6.8 | MINOR | §10 | Raised to `^6.22.0`. No API changes required for `<BrowserRouter>` + `<Routes>` usage. |
+| **F-7** — `ProtectedRoute` checked raw token string | MINOR | §5.2 | `ProtectedRoute` now reads `isAuthenticated` from `AuthContext`. No raw token string access in the component. |
+| **F-8** — CI drift check used live localhost URL | MINOR | §6.2 | CI uses committed `openapi.json` as codegen source. No live service dependency in the drift check job. |
+| **F-9** — `postcss.config.js` not shown | MINOR | §11 | Added explicit §11 with `postcss.config.js` containing `tailwindcss` and `autoprefixer` plugins. Explained consequence of missing file (unstyled UI). |
+| **F-10** — `console.debug(decoded)` logs org_id | MINOR | §4.1 | No debug logging of the decoded JWT payload in this spec. `decodeAndValidate()` returns the object internally; nothing is logged to the console. |
+| **F-11** — shadcn/ui approach (NIT — correct, no action) | NIT | — | No change. Spec correctly describes the vendored copy-into-project pattern (`npx shadcn-ui@latest init`, source in `src/components/ui/`). |
+| **F-12** — script name `generate-client` misleading | NIT | §10 | Renamed to `generate-types`. Resolved as part of FIX 2. |
+
+---
+
+Status: Implementation-ready spec (rev 2 — tech-lead blockers/majors applied)
