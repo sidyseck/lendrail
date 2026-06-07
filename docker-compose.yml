@@ -61,12 +61,16 @@ services:
   frontend:
     build: ./frontend
     command: npm run dev -- --host
+    environment:
+      # Vite proxy forwards /api/* to the backend service (prefix stripped via rewrite).
+      VITE_API_TARGET: http://api:8000
     ports:
       - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
     depends_on:
       - api
-    profiles:
-      - frontend
 
 volumes:
   pgdata:
