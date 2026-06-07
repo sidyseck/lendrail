@@ -1,0 +1,1140 @@
+# LendRail — Feature Decomposition
+
+| Field | Value |
+|---|---|
+| Based on | MASTER_PRD.md v0.1, ARCHITECTURE.md v0.2 |
+| Date | June 2026 |
+| Status | Working draft |
+
+---
+
+## Milestones
+
+| Milestone | Goal |
+|---|---|
+| **M0 — Foundation** | Project scaffolding, Docker Compose, DB migrations, auth skeleton. Nothing domain-specific. |
+| **M1 — Onboarding** | Supplier, Agent, and Borrower can register and be recognized by the system. |
+| **M2 — Connection** | Supplier and Agent can connect; custodian API key provisioned and validated against mock. |
+| **M3 — Agreement** | Lending agreement terms entered and dual-confirmed. |
+| **M4 — Loan lifecycle** | Agent books loans; loans move through states; mock custodian confirms. |
+| **M5 — Risk monitoring** | LTV calculated and displayed; alerts fire; feed staleness flagged. |
+| **M6 — Accrual & Reporting** | Daily accruals run; monthly statement generated and locked. |
+
+---
+
+## M0 — Foundation
+
+---
+
+### F-001 — Monorepo layout and Docker Compose stack
+**Milestone:** M0
+**Depends on:** none
+**Actor(s):** System (developer)
+
+**What it does:** Creates the top-level repository layout (`backend/`, `frontend/`, `docker-compose.yml`, `.env.local.example`) and wires five Docker services — postgres, redis, api, worker, frontend — so the full stack starts with `docker compose up`.
+
+**Acceptance criteria:**
+- [ ] `docker compose up` starts without errors on a clean checkout (no pre-existing volumes).
+- [ ] `curl http://localhost:8000/healthz` returns `{"status": "ok"}` with HTTP 200.
+- [ ] `curl http://localhost:5173` returns an HTML response (Vite dev server is live).
+- [ ] `docker compose down -v` tears down cleanly; re-running `up` rebuilds successfully.
+- [ ] `.env.local.example` lists every required environment variable with placeholder values and a comment.
+
+**Out of scope for this feature:** Any domain endpoints, database tables, authentication, real business logic.
+
+---
+
+### F-002 — PostgreSQL database and Alembic migration runner
+**Milestone:** M0
+**Depends on:** F-001
+**Actor(s):** System
+
+**What it does:** Initializes Alembic in the `backend/` directory with a working `alembic.ini` and `env.py` that connects to the Dockerized Postgres instance, and runs the initial empty migration to prove the pipeline works.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` runs against the Docker Postgres instance with zero errors.
+- [ ] `alembic history` shows at least one applied revision.
+- [ ] `alembic downgrade base` reverts cleanly and `alembic upgrade head` re-applies with no errors.
+- [ ] The `DATABASE_URL` is read from the environment variable, not hardcoded.
+
+**Out of scope for this feature:** Any application tables; those are created in subsequent F-IDs.
+
+---
+
+### F-003 — SQLAlchemy async session factory and repository base
+**Milestone:** M0
+**Depends on:** F-002
+**Actor(s):** System
+
+**What it does:** Provides the shared async SQLAlchemy engine, session factory, and a `BaseRepository` class with `get`, `create`, `update`, and `delete` helpers that all future repositories will extend.
+
+**Acceptance criteria:**
+- [ ] A unit test opens an async session against the test database, creates a minimal row via a test repository, and reads it back — all assertions pass.
+- [ ] The session is properly closed after each request (no connection leaks detectable via `pg_stat_activity`).
+- [ ] `BaseRepository` methods raise a typed `NotFoundError` (not a raw SQLAlchemy exception) when a record is missing.
+
+**Out of scope for this feature:** Any domain models or tables.
+
+---
+
+### F-004 — JWT authentication: login endpoint and `get_current_user` dependency
+**Milestone:** M0
+**Depends on:** F-003
+**Actor(s):** System / all roles
+
+**What it does:** Implements `POST /auth/login` (email + password against a local `users` table), issues a signed JWT containing `user_id`, `org_id`, and `role` claims, and provides a reusable FastAPI dependency `get_current_user` that validates the token on every protected request.
+
+**Acceptance criteria:**
+- [ ] `POST /auth/login` with valid credentials returns HTTP 200 with a `{ "access_token": "...", "token_type": "bearer" }` response.
+- [ ] `POST /auth/login` with wrong password returns HTTP 401.
+- [ ] A protected endpoint decorated with `Depends(get_current_user)` returns HTTP 401 when no token is provided.
+- [ ] A protected endpoint returns HTTP 401 when the token is tampered with (signature invalid).
+- [ ] The decoded token contains `user_id`, `org_id`, and `role` fields with correct types.
+- [ ] JWT signing key is read from the `JWT_SECRET` environment variable.
+
+**Out of scope for this feature:** Role-based authorization beyond token validation; user registration (covered in onboarding features); password reset.
+
+---
+
+### F-005 — Role-based access control (RBAC) enforcement helpers
+**Milestone:** M0
+**Depends on:** F-004
+**Actor(s):** System
+
+**What it does:** Provides reusable FastAPI dependencies (`require_role("supplier")`, `require_role("agent")`, `require_role("admin")`) and a two-step enforcement pattern (role check + ownership check) used by all domain services.
+
+**Acceptance criteria:**
+- [ ] A route guarded by `require_role("agent")` returns HTTP 403 when called with a supplier JWT.
+- [ ] A route guarded by `require_role("supplier")` returns HTTP 403 when called with an agent JWT.
+- [ ] An admin JWT passes `require_role("admin")` checks.
+- [ ] Unit tests cover all three role combinations against each guard.
+- [ ] The `AuthUser` dataclass (`user_id`, `org_id`, `role`) is the only type passed from the auth layer into domain services.
+
+**Out of scope for this feature:** Per-resource ownership checks (those live in each domain service).
+
+---
+
+### F-006 — Notification service interface and console adapter
+**Milestone:** M0
+**Depends on:** F-003
+**Actor(s):** System
+
+**What it does:** Defines the `NotificationService` interface and a `ConsoleNotificationAdapter` that logs events to stdout. Creates an in-app `notifications` DB table for storing notification rows. Wires adapter selection via the `NOTIFICATION_ADAPTER` environment variable.
+
+**Acceptance criteria:**
+- [ ] Calling `NotificationService.send(event="test", recipients=[...])` with `NOTIFICATION_ADAPTER=console` prints a structured log line to stdout containing the event name and recipient IDs.
+- [ ] A `notifications` table exists in Postgres after migration with columns: `id`, `user_id`, `event`, `payload` (JSONB), `created_at`, `read_at`.
+- [ ] A unit test verifies the console adapter logs correctly without calling any external service.
+- [ ] Swapping to a different adapter does not require changes outside `main.py` DI wiring.
+
+**Out of scope for this feature:** Email delivery (Resend adapter); in-app notification read/unread API endpoints.
+
+---
+
+### F-007 — Background job scheduler: ARQ worker setup
+**Milestone:** M0
+**Depends on:** F-001
+**Actor(s):** System
+
+**What it does:** Wires ARQ with the Dockerized Redis instance, defines a `WorkerSettings` class, and adds a no-op `health_check_job` that runs every minute as a smoke test.
+
+**Acceptance criteria:**
+- [ ] `docker compose up worker` starts without errors.
+- [ ] The health check job runs every 60 seconds and logs a line confirming execution.
+- [ ] A failed job (raises an exception) is logged at ERROR level with the traceback; the worker does not crash.
+- [ ] `REDIS_URL` is read from the environment variable.
+
+**Out of scope for this feature:** Any domain-specific jobs; job scheduling intervals for LTV refresh or accruals.
+
+---
+
+### F-008 — Mock custodian adapter and mock market data adapter
+**Milestone:** M0
+**Depends on:** F-001
+**Actor(s):** System
+
+**What it does:** Implements `MockCustodianAdapter` and `MockMarketDataAdapter` as concrete Python classes matching the `CustodianAdapter` and `MarketDataAdapter` Protocol interfaces defined in `adapters/interfaces.py`. Wires them as the default adapters when `CUSTODIAN_ADAPTER=mock` and `MARKET_DATA_ADAPTER=mock`.
+
+**Acceptance criteria:**
+- [ ] `MockCustodianAdapter.get_inventory("any-ref")` returns at least one `InventoryPosition` with `asset_type="BTC"` and a non-null `as_of` timestamp.
+- [ ] `MockCustodianAdapter.get_collateral("any-ref")` returns a `CollateralPosition` or `None` based on seeded state.
+- [ ] `MockCustodianAdapter.validate_key()` returns `True`.
+- [ ] `MockCustodianAdapter.transmit_instruction(...)` returns an `InstructionResult` with `success=True` and a non-empty `custodian_ref`.
+- [ ] `MockMarketDataAdapter.get_price("BTC")` returns an `AssetPrice` with a fixed positive `price_usd`.
+- [ ] Swapping `CUSTODIAN_ADAPTER=mock` to a different value raises `NotImplementedError` (no real adapter wired yet).
+- [ ] Unit tests cover all four `CustodianAdapter` methods on the mock.
+
+**Out of scope for this feature:** Real custodian adapters (Anchorage); market data from a live feed.
+
+---
+
+### F-009 — Secret store interface and local env-based implementation
+**Milestone:** M0
+**Depends on:** F-001
+**Actor(s):** System
+
+**What it does:** Defines a `SecretStore` interface with `store(key, value) -> ref` and `retrieve(ref) -> value` methods. Implements `EnvSecretStore` that encrypts values with AES-256 and stores them as base64 strings keyed by a UUID reference. Wires it when `SECRET_STORE=env`.
+
+**Acceptance criteria:**
+- [ ] `EnvSecretStore.store("my-key")` returns a UUID reference string.
+- [ ] `EnvSecretStore.retrieve(ref)` returns the original plaintext value.
+- [ ] The plaintext value never appears in any log line (verified by log capture in a unit test).
+- [ ] An invalid reference raises a typed `SecretNotFoundError`.
+- [ ] The encryption key is derived from `JWT_SECRET` (or a dedicated `SECRET_STORE_KEY` env var).
+
+**Out of scope for this feature:** Vault or cloud secret manager adapters; key rotation.
+
+---
+
+### F-010 — React + Vite frontend scaffold with auth shell
+**Milestone:** M0
+**Depends on:** F-004
+**Actor(s):** System (developer)
+
+**What it does:** Scaffolds the React + TypeScript + Vite frontend with shadcn/ui, Tailwind CSS, React Router, and an auth context that stores and forwards the JWT. Provides a login page that calls `POST /auth/login` and redirects on success, and a `ProtectedRoute` wrapper that redirects unauthenticated users to `/login`.
+
+**Acceptance criteria:**
+- [ ] Visiting `http://localhost:5173/login` renders a login form with email and password fields and a submit button.
+- [ ] Submitting valid credentials redirects the user to `/dashboard` and stores the token in memory (not `localStorage`).
+- [ ] Submitting invalid credentials displays an error message below the form without a full page reload.
+- [ ] Visiting a protected route without a token redirects to `/login`.
+- [ ] After login, the JWT is attached as a `Bearer` token to all API calls (verified by browser network tab).
+- [ ] TypeScript compilation passes with zero type errors (`tsc --noEmit`).
+
+**Out of scope for this feature:** Any domain-specific pages beyond login and an empty dashboard shell; role-specific navigation.
+
+---
+
+## M1 — Onboarding
+
+---
+
+### F-011 — Organization DB table and migration
+**Milestone:** M1
+**Depends on:** F-002
+**Actor(s):** System
+
+**What it does:** Adds the `organizations` Alembic migration creating the `Organization` table with columns: `id` (UUID PK), `name`, `jurisdiction`, `entity_type` (ENUM), `role` (ENUM: supplier, agent, admin), `contact_email`, `created_at`.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` applies the migration without errors.
+- [ ] `alembic downgrade -1` drops the table cleanly.
+- [ ] The `role` column accepts only `supplier`, `agent`, `admin`; inserting any other value raises a DB-level error.
+- [ ] `entity_type` accepts only `fund`, `corporate_treasury`, `foundation`, `agent`.
+
+**Out of scope for this feature:** User table (covered in F-012); CustodianLink table (F-016).
+
+---
+
+### F-012 — Users DB table, password hashing, and migration
+**Milestone:** M1
+**Depends on:** F-011
+**Actor(s):** System
+
+**What it does:** Adds the `users` Alembic migration creating a `users` table with `id`, `org_id` (FK → organizations), `email`, `hashed_password`, `created_at`. Provides a `hash_password` / `verify_password` utility using bcrypt.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` applies cleanly; downgrade removes the table.
+- [ ] `hash_password("secret")` returns a bcrypt hash string.
+- [ ] `verify_password("secret", hash)` returns `True`; `verify_password("wrong", hash)` returns `False`.
+- [ ] The raw password never appears in any log line (verified by log capture test).
+- [ ] A user row cannot be inserted without a valid `org_id` FK reference (DB enforces the constraint).
+
+**Out of scope for this feature:** Password reset, email verification, session management.
+
+---
+
+### F-013 — Supplier registration API endpoint
+**Milestone:** M1
+**Depends on:** F-011, F-012, F-005
+**Actor(s):** Supplier
+
+**What it does:** Implements `POST /orgs/register` (public endpoint, no auth required) accepting `name`, `jurisdiction`, `entity_type`, `contact_email`, `password`, and `role=supplier`. Creates the `Organization` row, hashes and stores the user's password, and returns a JWT so the user is immediately logged in.
+
+**Acceptance criteria:**
+- [ ] `POST /orgs/register` with valid supplier fields returns HTTP 201 with `{ "org_id": "...", "access_token": "..." }`.
+- [ ] The returned JWT contains `role=supplier` and the correct `org_id`.
+- [ ] Attempting to register with an already-used email returns HTTP 409 with an error body.
+- [ ] `entity_type` values outside the allowed ENUM return HTTP 422.
+- [ ] The `password` field is never returned in any response body.
+- [ ] Integration test: register, then call `GET /orgs/me` with the returned token and receive the org record.
+
+**Out of scope for this feature:** Custodian linkage; notification preferences; custodian invitation flow.
+
+---
+
+### F-014 — Supplier registration UI
+**Milestone:** M1
+**Depends on:** F-010, F-013
+**Actor(s):** Supplier
+
+**What it does:** React page at `/register/supplier` with a form for legal name, jurisdiction, entity type (dropdown), primary contact email, and password. On success, stores the token and redirects to `/dashboard`.
+
+**Acceptance criteria:**
+- [ ] All required fields display inline validation errors when submitted empty.
+- [ ] `entity_type` dropdown offers exactly: Fund, Corporate Treasury, Foundation.
+- [ ] Successful submission stores the JWT and navigates to `/dashboard`.
+- [ ] A duplicate email submission shows a user-readable error message ("Email already registered").
+- [ ] TypeScript compilation passes with zero errors.
+
+**Out of scope for this feature:** Custodian linkage form; notification preferences form.
+
+---
+
+### F-015 — Agent registration API endpoint
+**Milestone:** M1
+**Depends on:** F-011, F-012, F-005
+**Actor(s):** Agent
+
+**What it does:** Handles `POST /orgs/register` with `role=agent`, accepting `name`, `jurisdiction`, `entity_type`, primary contact, ops/settlement contact email, and self-attested regulatory status checkbox. Creates `Organization` and `User` rows. Returns a JWT.
+
+**Acceptance criteria:**
+- [ ] `POST /orgs/register` with `role=agent` and all required fields returns HTTP 201 with `{ "org_id": "...", "access_token": "..." }`.
+- [ ] The returned JWT contains `role=agent`.
+- [ ] Missing `ops_contact_email` returns HTTP 422.
+- [ ] `regulatory_status_attested=false` returns HTTP 422 with a message indicating attestation is required.
+- [ ] Duplicate email returns HTTP 409.
+- [ ] Integration test: register agent, then call `GET /orgs/me` and verify `role=agent`.
+
+**Out of scope for this feature:** Custodian linkage; agent-side billing; market data access.
+
+---
+
+### F-016 — Agent registration UI
+**Milestone:** M1
+**Depends on:** F-010, F-015
+**Actor(s):** Agent
+
+**What it does:** React page at `/register/agent` with a form for entity details, ops/settlement contact, and a required regulatory status attestation checkbox.
+
+**Acceptance criteria:**
+- [ ] Form shows an error when the attestation checkbox is unchecked and the user tries to submit.
+- [ ] Ops/settlement contact email field is present and required.
+- [ ] Successful submission stores the JWT and navigates to `/dashboard`.
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** Custodian linkage UI.
+
+---
+
+### F-017 — Borrower DB table and migration
+**Milestone:** M1
+**Depends on:** F-011
+**Actor(s):** System
+
+**What it does:** Adds the `borrowers` Alembic migration with columns: `id` (UUID PK), `invited_by` (FK → organizations), `name`, `jurisdiction`, `contact_email`, `status` (ENUM: invited, active), `created_at`.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` applies cleanly; `downgrade -1` removes the table.
+- [ ] `status` accepts only `invited` or `active` at the DB level.
+- [ ] `invited_by` FK references a valid organization; inserting an unknown `org_id` raises a constraint error.
+
+**Out of scope for this feature:** Borrower-facing auth; borrower portal.
+
+---
+
+### F-018 — Borrower invite and account creation API endpoint
+**Milestone:** M1
+**Depends on:** F-017, F-005, F-006
+**Actor(s):** Agent
+
+**What it does:** Implements `POST /borrowers/invite` (requires agent JWT). The agent provides `email`, `name`, `jurisdiction`. The platform creates a `Borrower` row with `status=invited`, linked to the calling agent's org, and fires a notification (console log in MVP) that would carry the invite link.
+
+**Acceptance criteria:**
+- [ ] `POST /borrowers/invite` with a valid agent JWT and required fields returns HTTP 201 with `{ "borrower_id": "..." }`.
+- [ ] Calling with a supplier JWT returns HTTP 403.
+- [ ] The new borrower row has `invited_by` = the calling agent's `org_id`.
+- [ ] A notification event `"borrower_invited"` is logged by the console adapter containing the borrower email.
+- [ ] Inviting the same email twice returns HTTP 409.
+- [ ] `GET /borrowers/{id}` (agent JWT) returns the borrower record.
+
+**Out of scope for this feature:** Borrower self-registration UI; borrower email links that actually work; borrower-facing portal.
+
+---
+
+### F-019 — `GET /orgs/me` endpoint
+**Milestone:** M1
+**Depends on:** F-013, F-015, F-004
+**Actor(s):** Supplier, Agent
+
+**What it does:** Returns the authenticated user's organization record.
+
+**Acceptance criteria:**
+- [ ] `GET /orgs/me` with a valid JWT returns HTTP 200 with the organization fields (no password hash).
+- [ ] Without a token returns HTTP 401.
+- [ ] The response never includes `hashed_password`.
+
+**Out of scope for this feature:** Org update/edit endpoints.
+
+---
+
+## M2 — Connection
+
+---
+
+### F-020 — CustodianLink DB table and migration
+**Milestone:** M2
+**Depends on:** F-011
+**Actor(s):** System
+
+**What it does:** Adds the `custodian_links` Alembic migration with columns: `id`, `org_id` (FK), `custodian_id`, `account_ref`, `encrypted_api_key_ref` (vault reference string, not the key), `scope` (JSONB), `status` (ENUM: active, suspended, revoked), `created_at`.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` applies cleanly; downgrade reverses cleanly.
+- [ ] `status` column enforces the ENUM at DB level.
+- [ ] `encrypted_api_key_ref` column is `TEXT NOT NULL`; the plaintext key is never stored here.
+
+**Out of scope for this feature:** Connection table (F-021); key rotation logic.
+
+---
+
+### F-021 — Connection DB table and migration
+**Milestone:** M2
+**Depends on:** F-020
+**Actor(s):** System
+
+**What it does:** Adds the `connections` Alembic migration with columns: `id`, `supplier_id` (FK → organizations), `agent_id` (FK → organizations), `status` (ENUM: pending, active, suspended, terminated), `custodian_link_id` (FK → custodian_links, nullable until key is registered), `created_at`, `activated_at`.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` and `downgrade -1` work cleanly.
+- [ ] `supplier_id` and `agent_id` must each reference an existing organization row.
+- [ ] `status` enforces the ENUM at DB level.
+- [ ] A UNIQUE constraint prevents two `connections` rows with the same `(supplier_id, agent_id)` pair.
+
+**Out of scope for this feature:** Agreement table; loan table.
+
+---
+
+### F-022 — Supplier sends connection invitation API
+**Milestone:** M2
+**Depends on:** F-021, F-005, F-006
+**Actor(s):** Supplier
+
+**What it does:** `POST /connections/invite` (supplier JWT). The supplier provides an agent email or `agent_org_id`. If the agent exists, a `Connection` row is created with `status=pending` and a notification event is sent. If the agent does not exist, an email invite is logged (no account created).
+
+**Acceptance criteria:**
+- [ ] `POST /connections/invite` with a valid supplier JWT and a known `agent_org_id` returns HTTP 201 with `{ "connection_id": "...", "status": "pending" }`.
+- [ ] Calling with an agent JWT returns HTTP 403.
+- [ ] Inviting an unknown agent by email logs a `"connection_invite_to_unknown"` notification event and returns HTTP 202.
+- [ ] Inviting the same agent twice returns HTTP 409.
+- [ ] The connection `status` is `pending` in the DB.
+
+**Out of scope for this feature:** Agent-initiated invitation (direction is supplier → agent per MVP assumption); marketplace discovery.
+
+---
+
+### F-023 — Agent accepts connection invitation API
+**Milestone:** M2
+**Depends on:** F-022, F-005, F-006
+**Actor(s):** Agent
+
+**What it does:** `POST /connections/{id}/accept` (agent JWT). Validates the connection belongs to the calling agent, transitions `status` to `pending` (awaiting API key), and sends a notification to the supplier.
+
+**Acceptance criteria:**
+- [ ] `POST /connections/{id}/accept` with the correct agent JWT returns HTTP 200 with `{ "connection_id": "...", "status": "pending" }`.
+- [ ] Calling with a supplier JWT returns HTTP 403.
+- [ ] Calling with an agent whose `org_id` does not match the connection's `agent_id` returns HTTP 403.
+- [ ] Accepting a connection that is not in `pending` state returns HTTP 409.
+- [ ] A `"connection_accepted"` notification event is logged.
+
+**Out of scope for this feature:** Custodian API key entry (F-024).
+
+---
+
+### F-024 — Supplier registers custodian API key for a connection
+**Milestone:** M2
+**Depends on:** F-023, F-008, F-009, F-005
+**Actor(s):** Supplier
+
+**What it does:** `POST /connections/{id}/custodian-key` (supplier JWT). The supplier provides the plaintext API key and the custodian account reference. The platform: stores the key via `SecretStore`, calls `CustodianAdapter.validate_key()`, creates a `CustodianLink` row (storing only the vault ref), attaches it to the connection, and transitions `status` to `active` if validation succeeds.
+
+**Acceptance criteria:**
+- [ ] With `CUSTODIAN_ADAPTER=mock`, submitting any non-empty key string returns HTTP 200 and sets connection `status=active`.
+- [ ] The plaintext API key is not present in the HTTP response body.
+- [ ] The plaintext API key is not present in any log line (verified by log capture in test).
+- [ ] `CustodianLink.encrypted_api_key_ref` contains a vault reference string, not the plaintext key.
+- [ ] If `validate_key()` returns `False` (seeded mock failure), the endpoint returns HTTP 422 with `"custodian_key_invalid"` error code and the connection remains `pending`.
+- [ ] Calling with an agent JWT returns HTTP 403.
+
+**Out of scope for this feature:** Key rotation; connection suspension; real Anchorage API validation.
+
+---
+
+### F-025 — Connection management: suspension and termination API
+**Milestone:** M2
+**Depends on:** F-024, F-005, F-006
+**Actor(s):** Supplier, Agent
+
+**What it does:** `POST /connections/{id}/suspend` and `POST /connections/{id}/terminate` (supplier or agent JWT, either party may act). On termination, flags all active loans on the connection and sends notifications to both parties, including a warning that the supplier must rotate the custodian key.
+
+**Acceptance criteria:**
+- [ ] Either party (supplier or agent JWT) can call `suspend` and `terminate`.
+- [ ] `suspend` transitions `status` to `suspended`; `terminate` to `terminated`.
+- [ ] Terminating a connection with active loans sets those loans to a `flagged` annotation (or equivalent) and includes the loan IDs in the response body.
+- [ ] A `"connection_terminated_rotate_key"` notification event is logged for the supplier.
+- [ ] Calling `terminate` on an already-terminated connection returns HTTP 409.
+
+**Out of scope for this feature:** Automatic custodian key revocation; loan resolution after termination.
+
+---
+
+### F-026 — Connection list and detail API endpoints
+**Milestone:** M2
+**Depends on:** F-024, F-005
+**Actor(s):** Supplier, Agent
+
+**What it does:** `GET /connections` (returns connections for the calling org) and `GET /connections/{id}` (returns detail including status and custodian link status). Access-controlled so each org sees only its own connections.
+
+**Acceptance criteria:**
+- [ ] `GET /connections` with a supplier JWT returns only connections where `supplier_id = caller.org_id`.
+- [ ] `GET /connections` with an agent JWT returns only connections where `agent_id = caller.org_id`.
+- [ ] `GET /connections/{id}` with a JWT from an org not in the connection returns HTTP 403.
+- [ ] Response includes `status`, `activated_at`, and whether the `custodian_link` is present.
+- [ ] Admin JWT can call `GET /connections` and receives all connections (no filter).
+
+**Out of scope for this feature:** Connection UI pages (F-027).
+
+---
+
+### F-027 — Connection management UI
+**Milestone:** M2
+**Depends on:** F-026, F-010
+**Actor(s):** Supplier, Agent
+
+**What it does:** React pages for: (a) Supplier: send invitation, view pending/active/terminated connections, enter custodian API key; (b) Agent: view pending invitations, accept invitation.
+
+**Acceptance criteria:**
+- [ ] Supplier dashboard lists all connections with their current `status`.
+- [ ] Supplier can click "Invite Agent" → enter agent email → submit → sees new connection in "Pending" state.
+- [ ] After agent accepts, supplier sees a prompt to "Register Custodian Key" with an input field.
+- [ ] Entering the key and submitting shows "Active" status when mock validation succeeds.
+- [ ] Agent dashboard shows pending invitations and an "Accept" button per invitation.
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** Connection scope configuration UI (which accounts/assets are in scope); key rotation UI.
+
+---
+
+## M3 — Agreement
+
+---
+
+### F-028 — LendingAgreement DB table and migration
+**Milestone:** M3
+**Depends on:** F-021
+**Actor(s):** System
+
+**What it does:** Adds the `lending_agreements` Alembic migration with all columns per the data model: `id`, `connection_id` (FK), `version`, `assets_in_scope` (TEXT[]), `eligible_collateral` (TEXT[]), `initial_ltv_pct`, `margin_call_ltv_pct`, `recall_notice_days`, `max_loan_days`, `day_count_basis` (ENUM: actual_360, actual_365), `agent_fee_bps`, `confirmed_by_supplier_at`, `confirmed_by_agent_at`, `created_at`.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` applies cleanly; `downgrade -1` reverses cleanly.
+- [ ] `day_count_basis` enforces the ENUM at DB level.
+- [ ] `connection_id` FK enforces referential integrity.
+- [ ] `version` starts at 1 for a new agreement and increments on each re-confirmation (enforced at application layer, not DB).
+
+**Out of scope for this feature:** Agreement API endpoints; confirmation flow.
+
+---
+
+### F-029 — Agreement terms entry API (agent)
+**Milestone:** M3
+**Depends on:** F-028, F-005, F-006
+**Actor(s):** Agent
+
+**What it does:** `POST /connections/{id}/agreement` (agent JWT). Creates a new `LendingAgreement` row with all required terms, `version=1`, and both confirmation timestamps as `NULL`. Sends a notification to the supplier to review and confirm.
+
+**Acceptance criteria:**
+- [ ] `POST /connections/{id}/agreement` with all required fields and an agent JWT returns HTTP 201 with `{ "agreement_id": "...", "version": 1 }`.
+- [ ] Calling with a supplier JWT returns HTTP 403.
+- [ ] Missing any required term returns HTTP 422 with field-level error messages.
+- [ ] `margin_call_ltv_pct` must be greater than `initial_ltv_pct`; violation returns HTTP 422.
+- [ ] `initial_ltv_pct` must be between 0 and 100; violation returns HTTP 422.
+- [ ] A `"agreement_pending_supplier_confirmation"` notification event is logged.
+- [ ] The connection must have `status=active`; submitting on a `pending` connection returns HTTP 409.
+
+**Out of scope for this feature:** Supplier confirmation; term changes; PDF extraction.
+
+---
+
+### F-030 — Agreement confirmation API (supplier and agent)
+**Milestone:** M3
+**Depends on:** F-029, F-005, F-006
+**Actor(s):** Supplier, Agent
+
+**What it does:** `POST /agreements/{id}/confirm` (supplier or agent JWT). Sets `confirmed_by_supplier_at` or `confirmed_by_agent_at` respectively. When both timestamps are set, the agreement is considered active and the program goes live. Notifies the other party on each confirmation.
+
+**Acceptance criteria:**
+- [ ] Supplier calling `confirm` sets `confirmed_by_supplier_at` to the current timestamp.
+- [ ] Agent calling `confirm` sets `confirmed_by_agent_at` to the current timestamp.
+- [ ] After both parties confirm, `GET /agreements/{id}` returns `status: active` (derived field: both timestamps non-null).
+- [ ] Calling `confirm` on an agreement where the caller has already confirmed returns HTTP 409.
+- [ ] A `"agreement_confirmed_by_supplier"` or `"agreement_confirmed_by_agent"` notification event is logged.
+- [ ] Calling with a JWT from an org not in the connection returns HTTP 403.
+
+**Out of scope for this feature:** Agreement re-confirmation after term changes; e-signature.
+
+---
+
+### F-031 — Agreement term change and re-confirmation flow API
+**Milestone:** M3
+**Depends on:** F-030, F-005, F-006
+**Actor(s):** Supplier, Agent
+
+**What it does:** `PUT /agreements/{id}` (agent JWT). Creates a new `LendingAgreement` row with `version = previous_version + 1` and both confirmation timestamps as `NULL`. Previous version is retained in the DB. Notifies both parties that re-confirmation is required.
+
+**Acceptance criteria:**
+- [ ] `PUT /agreements/{id}` with an agent JWT and at least one changed field returns HTTP 201 with a new `agreement_id` and incremented `version`.
+- [ ] The previous agreement version row is not deleted or modified.
+- [ ] Both `confirmed_by_supplier_at` and `confirmed_by_agent_at` on the new version are `NULL`.
+- [ ] A `"agreement_requires_reconfirmation"` notification event is logged for both parties.
+- [ ] All historical versions are returned by `GET /connections/{id}/agreement/history` ordered by `version` ascending.
+
+**Out of scope for this feature:** Automatic blocking of new loan bookings during re-confirmation (deferred to F-038 validation).
+
+---
+
+### F-032 — Agreement UI: entry and confirmation flow
+**Milestone:** M3
+**Depends on:** F-027, F-029, F-030, F-031
+**Actor(s):** Supplier, Agent
+
+**What it does:** React pages for: (a) Agent: form to enter all agreement terms for an active connection; (b) Supplier: review terms and click "Confirm"; (c) Both: view current agreement and version history.
+
+**Acceptance criteria:**
+- [ ] Agent can navigate to a connection and click "Enter Agreement Terms", fill the form, and submit.
+- [ ] All numeric fields show inline validation (e.g., LTV must be 0–100, margin call must exceed initial LTV).
+- [ ] Supplier dashboard shows a "Pending Your Confirmation" badge on agreements awaiting supplier action.
+- [ ] Both parties can see the current confirmed agreement terms in a read-only view.
+- [ ] Agreement version history page lists all versions with timestamps.
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** PDF upload; e-signature widget.
+
+---
+
+## M4 — Loan Lifecycle
+
+---
+
+### F-033 — Loan DB table and migration
+**Milestone:** M4
+**Depends on:** F-028, F-017
+**Actor(s):** System
+
+**What it does:** Adds the `loans` Alembic migration with all columns per the data model: `id`, `connection_id` (FK), `agreement_id` (FK), `borrower_id` (FK), `asset_type`, `quantity`, `rate_bps`, `term_type` (ENUM: open, fixed), `maturity_date`, `day_count_basis` (ENUM), `collateral_type`, `collateral_quantity`, `collateral_value_usd`, `current_ltv_pct`, `ltv_as_of`, `state` (ENUM: pending, active, margin_call, recall_initiated, settled, defaulted), `booked_at`, `settled_at`.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` applies; `downgrade -1` reverses cleanly.
+- [ ] `state` ENUM enforces only the six allowed values at DB level.
+- [ ] `term_type = fixed` with `maturity_date = NULL` is rejected at application layer (not necessarily DB constraint).
+- [ ] All FK constraints are enforced by the DB.
+
+**Out of scope for this feature:** Accrual table (F-050); statement table (F-053).
+
+---
+
+### F-034 — Approved borrower list on connection (agent + supplier)
+**Milestone:** M4
+**Depends on:** F-021, F-017, F-005
+**Actor(s):** Agent, Supplier
+
+**What it does:** `POST /connections/{id}/approved-borrowers` (agent JWT) to add a borrower to the supplier's approved list for this connection. `GET /connections/{id}/approved-borrowers` for both parties to view the list. Supplier can remove a borrower via `DELETE /connections/{id}/approved-borrowers/{borrower_id}`.
+
+**Acceptance criteria:**
+- [ ] Agent can add a borrower they manage to the approved list; returns HTTP 201.
+- [ ] Adding a borrower not managed by the calling agent returns HTTP 403.
+- [ ] Supplier can view the approved borrower list.
+- [ ] Supplier can remove a borrower from the list; returns HTTP 200.
+- [ ] `GET /connections/{id}/approved-borrowers` with a JWT from an org not in the connection returns HTTP 403.
+
+**Out of scope for this feature:** Borrower-initiated join request; multi-agent borrower visibility.
+
+---
+
+### F-035 — Loan booking API endpoint
+**Milestone:** M4
+**Depends on:** F-033, F-034, F-008, F-005, F-006
+**Actor(s):** Agent
+
+**What it does:** `POST /loans` (agent JWT). Accepts all loan booking fields, runs the five-point validation against agreement terms, checks inventory and collateral via `CustodianAdapter`, creates a `Loan` row with `state=pending`, and sends notifications to both parties.
+
+**Acceptance criteria:**
+- [ ] Valid booking returns HTTP 201 with `{ "loan_id": "...", "state": "pending" }`.
+- [ ] Booking with a borrower not on the approved list returns HTTP 422 with code `"borrower_not_approved"`.
+- [ ] Booking with `asset_type` not in `agreement.assets_in_scope` returns HTTP 422 with code `"asset_not_in_scope"`.
+- [ ] Booking with `collateral_type` not in `agreement.eligible_collateral` returns HTTP 422 with code `"collateral_not_eligible"`.
+- [ ] Booking where `collateral_value / (quantity × btc_price)` exceeds `agreement.initial_ltv_pct` returns HTTP 422 with code `"ltv_exceeded"`.
+- [ ] Booking with `quantity` below the agreement minimum returns HTTP 422 with code `"below_minimum_size"`.
+- [ ] Mock inventory check: if `MockCustodianAdapter` is seeded with insufficient BTC, returns HTTP 422 with code `"insufficient_inventory"`.
+- [ ] A `"loan_booked"` notification event is logged for both supplier and agent.
+- [ ] Calling with a supplier JWT returns HTTP 403.
+
+**Out of scope for this feature:** State transition to `active` (F-036); collateral substitution (F-040).
+
+---
+
+### F-036 — Loan state: pending → active transition (LTV refresh worker)
+**Milestone:** M4
+**Depends on:** F-035, F-007, F-008
+**Actor(s):** System
+
+**What it does:** An ARQ job `ltv_refresh_job` checks all `pending` loans, calls `CustodianAdapter.get_inventory` and `get_collateral`, and transitions loans to `active` when both confirm. Timestamps the `activated_at` equivalent on the loan.
+
+**Acceptance criteria:**
+- [ ] After the job runs against a pending loan with the mock adapter returning valid inventory + collateral, the loan `state` transitions to `active`.
+- [ ] If the mock adapter returns `None` for collateral, the loan remains `pending` and no error is raised.
+- [ ] A `"loan_activated"` notification event is logged when a loan transitions to `active`.
+- [ ] The job processes all pending loans in a single run, not just one.
+- [ ] Job run is idempotent: running it twice on an already-active loan does not change state or log duplicate notifications.
+
+**Out of scope for this feature:** Margin call logic (F-043); LTV staleness alerts (F-045).
+
+---
+
+### F-037 — Loan list and detail API endpoints
+**Milestone:** M4
+**Depends on:** F-035, F-005
+**Actor(s):** Supplier, Agent
+
+**What it does:** `GET /loans` and `GET /loans/{id}`. Suppliers see only loans on their connections; agents see only loans on connections where they are the agent. Both see the same fields except: agent sees all fields; supplier sees borrower name only (not further borrower detail).
+
+**Acceptance criteria:**
+- [ ] `GET /loans` with supplier JWT returns only loans on connections where `supplier_id = caller.org_id`.
+- [ ] `GET /loans` with agent JWT returns only loans on connections where `agent_id = caller.org_id`.
+- [ ] `GET /loans/{id}` with a JWT from an unrelated org returns HTTP 403.
+- [ ] Supplier response includes `borrower_name` but not `borrower.contact_email`.
+- [ ] Response includes `state`, `current_ltv_pct`, `ltv_as_of`, and all booking fields.
+- [ ] Filtering by `?state=active` returns only active loans.
+
+**Out of scope for this feature:** Portfolio-level aggregates (F-044); risk cockpit UI (F-046).
+
+---
+
+### F-038 — Loan booking validation: agreement must be dual-confirmed
+**Milestone:** M4
+**Depends on:** F-035, F-030
+**Actor(s):** System
+
+**What it does:** Adds a guard in `LoanService.book_loan` that rejects bookings if the active agreement for the connection is not dual-confirmed (both `confirmed_by_supplier_at` and `confirmed_by_agent_at` are non-null).
+
+**Acceptance criteria:**
+- [ ] Booking a loan against a connection with no confirmed agreement returns HTTP 409 with code `"no_active_agreement"`.
+- [ ] Booking a loan against a connection with a partially-confirmed agreement (one party only) returns HTTP 409 with code `"agreement_not_fully_confirmed"`.
+- [ ] After both parties confirm, booking proceeds normally.
+
+**Out of scope for this feature:** Blocking during re-confirmation (same guard applies to new un-confirmed versions).
+
+---
+
+### F-039 — Recall instruction flow API
+**Milestone:** M4
+**Depends on:** F-036, F-005, F-006, F-008
+**Actor(s):** Supplier, Agent
+
+**What it does:** `POST /loans/{id}/recall` (supplier JWT): transitions loan to `recall_initiated`, timestamps the instruction, notifies the agent with a notice period countdown. `POST /loans/{id}/return` (agent JWT): agent initiates asset return; platform calls `CustodianAdapter.transmit_instruction("return", ...)` and transitions loan to `settled` on success.
+
+**Acceptance criteria:**
+- [ ] Supplier calling `recall` on an `active` loan transitions it to `recall_initiated` and returns HTTP 200.
+- [ ] Agent calling `recall` on an `active` loan also transitions it to `recall_initiated` and returns HTTP 200.
+- [ ] A `"recall_initiated"` notification event is logged for both parties including the notice deadline (current time + `agreement.recall_notice_days`).
+- [ ] Agent calling `return` on a `recall_initiated` loan calls `MockCustodianAdapter.transmit_instruction` and transitions to `settled`.
+- [ ] The `InstructionResult.custodian_ref` is stored on the loan record.
+- [ ] If `transmit_instruction` returns `success=False`, the endpoint returns HTTP 502 and the loan remains `recall_initiated`.
+- [ ] Calling `recall` on a `settled` or `defaulted` loan returns HTTP 409.
+
+**Out of scope for this feature:** Partial recall; automated recall at maturity.
+
+---
+
+### F-040 — Collateral substitution API
+**Milestone:** M4
+**Depends on:** F-036, F-005, F-006
+**Actor(s):** Agent
+
+**What it does:** `POST /loans/{id}/collateral-substitution` (agent JWT). Agent provides new `collateral_type`, `collateral_quantity`, and `collateral_value_usd`. Platform validates the new collateral type is eligible per the agreement and that the resulting LTV meets the initial threshold. Updates the loan's collateral fields and sends a notification.
+
+**Acceptance criteria:**
+- [ ] Submitting an eligible collateral type with valid LTV returns HTTP 200 and updates the loan's collateral fields.
+- [ ] Submitting an ineligible collateral type returns HTTP 422 with code `"collateral_not_eligible"`.
+- [ ] Submitting collateral that would push LTV over `initial_ltv_pct` returns HTTP 422 with code `"ltv_exceeded"`.
+- [ ] Only callable on loans in `active` or `margin_call` state; any other state returns HTTP 409.
+- [ ] A `"collateral_substituted"` notification event is logged.
+
+**Out of scope for this feature:** Custodian confirmation of the new collateral (mock only in MVP).
+
+---
+
+### F-041 — Loan defaulted state transition API
+**Milestone:** M4
+**Depends on:** F-036, F-005, F-006
+**Actor(s):** Agent, Admin
+
+**What it does:** `POST /loans/{id}/default` (agent or admin JWT). Manually marks a loan as `defaulted`. Platform logs the transition and sends notifications to both parties.
+
+**Acceptance criteria:**
+- [ ] Agent calling `default` on a `recall_initiated` loan transitions it to `defaulted` and returns HTTP 200.
+- [ ] Admin can also call `default`.
+- [ ] Supplier calling `default` returns HTTP 403.
+- [ ] A `"loan_defaulted"` notification event is logged for both parties.
+- [ ] All state transitions are stored with a `transitioned_at` timestamp (either on the loan row or in an audit log).
+
+**Out of scope for this feature:** Automated default detection; off-platform resolution support.
+
+---
+
+### F-042 — Loan lifecycle UI
+**Milestone:** M4
+**Depends on:** F-037, F-039, F-040, F-041, F-010
+**Actor(s):** Supplier, Agent
+
+**What it does:** React pages for: (a) loan list with state badges and filtering; (b) loan detail showing all fields; (c) agent actions: initiate return; (d) supplier actions: initiate recall; (e) collateral substitution form.
+
+**Acceptance criteria:**
+- [ ] Loan list shows each loan's state with a color-coded badge (pending, active, margin_call, etc.).
+- [ ] Supplier sees "Recall" button on active loans; clicking it calls the recall endpoint and updates the UI.
+- [ ] Agent sees "Return Assets" button on `recall_initiated` loans; clicking it calls the return endpoint.
+- [ ] Agent sees "Substitute Collateral" button on active and margin-call loans.
+- [ ] Loan detail page shows all fields from `GET /loans/{id}`, including `ltv_as_of` timestamp.
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** Real-time updates (polling or websocket); partial recall UI.
+
+---
+
+## M5 — Risk Monitoring
+
+---
+
+### F-043 — LTV calculation and margin call state transition (worker)
+**Milestone:** M5
+**Depends on:** F-036, F-007, F-008
+**Actor(s):** System
+
+**What it does:** Extends the `ltv_refresh_job` (F-036) to calculate `current_ltv_pct` for all active loans using `collateral.value_usd / (loan.quantity × btc_price)`, store it with `ltv_as_of` timestamp, and transition loans to `margin_call` state when `current_ltv >= agreement.margin_call_ltv_pct`. Calls `NotificationService` on threshold breach.
+
+**Acceptance criteria:**
+- [ ] After the job runs, `loan.current_ltv_pct` is updated and `loan.ltv_as_of` reflects the collateral feed's `as_of` timestamp.
+- [ ] A loan whose mock collateral value yields LTV >= `margin_call_ltv_pct` transitions to `margin_call` and a `"margin_call"` notification is logged.
+- [ ] A loan whose LTV is within 10% of `margin_call_ltv_pct` (i.e., `current_ltv >= margin_call_ltv_pct * 0.90`) triggers a `"ltv_warning"` notification without changing state.
+- [ ] A loan already in `margin_call` state does not trigger a duplicate notification on re-run.
+- [ ] Job is idempotent for loans whose LTV has not changed.
+
+**Out of scope for this feature:** Portfolio-level metrics (F-044); UI display (F-046).
+
+---
+
+### F-044 — Portfolio-level risk metrics API
+**Milestone:** M5
+**Depends on:** F-043, F-005
+**Actor(s):** Supplier
+
+**What it does:** `GET /suppliers/{org_id}/risk-summary` (supplier JWT, must be own org). Returns: total BTC on loan, total collateral value USD, loan count by state, concentration per borrower (% of inventory on loan).
+
+**Acceptance criteria:**
+- [ ] Returns HTTP 200 with `total_btc_on_loan`, `total_collateral_usd`, `loans_by_state` (dict), `concentration_by_borrower` (list of {borrower_name, pct}).
+- [ ] Calling with a different supplier's `org_id` returns HTTP 403.
+- [ ] Agent calling this endpoint returns HTTP 403.
+- [ ] All numeric values reflect only active and margin-call loans (not settled/defaulted).
+
+**Out of scope for this feature:** Cross-program aggregation; scenario modeling.
+
+---
+
+### F-045 — Feed staleness detection and alerting (worker)
+**Milestone:** M5
+**Depends on:** F-043, F-006
+**Actor(s):** System
+
+**What it does:** Within the `ltv_refresh_job`, if `collateral.as_of` is older than a configurable staleness threshold (default: 1 hour), the job skips the LTV update, marks the loan's `ltv_as_of` with a staleness flag (or leaves it unchanged), and sends a `"feed_stale"` notification to supplier and agent.
+
+**Acceptance criteria:**
+- [ ] When mock adapter returns a `CollateralPosition` with `as_of` older than the staleness threshold, a `"feed_stale"` notification event is logged containing the `loan_id` and `feed_id`.
+- [ ] The loan's `current_ltv_pct` is not updated when the feed is stale.
+- [ ] The staleness threshold is configurable via an environment variable (e.g. `FEED_STALENESS_THRESHOLD_SECONDS`).
+- [ ] A fresh feed (as_of within threshold) does not trigger the stale notification.
+
+**Out of scope for this feature:** UI staleness badge (F-046); automated feed retry.
+
+---
+
+### F-046 — Risk cockpit UI
+**Milestone:** M5
+**Depends on:** F-044, F-045, F-037, F-010
+**Actor(s):** Supplier, Agent
+
+**What it does:** React dashboard page showing per-loan risk metrics (LTV, distance to margin call as a progress bar, state, collateral type, days to maturity, as-of timestamp) and portfolio-level summary (total on loan, total collateral, concentration).
+
+**Acceptance criteria:**
+- [ ] Supplier's risk cockpit shows a row per active loan with LTV, distance to margin call (%), state badge, and collateral type.
+- [ ] Distance to margin call is displayed as a progress bar with color coding: green (>20% buffer), amber (10–20%), red (<10%).
+- [ ] Each metric row shows `ltv_as_of` timestamp.
+- [ ] Loans with stale data show a "Data may be stale" warning indicator.
+- [ ] Portfolio summary section shows total BTC on loan, total collateral USD, and count by state.
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** Real-time websocket updates; stress test / scenario modeling panel; market data chart.
+
+---
+
+### F-047 — Alert notification events: recall deadline and loan maturity warnings
+**Milestone:** M5
+**Depends on:** F-007, F-039, F-006
+**Actor(s):** System
+
+**What it does:** A scheduled ARQ job `deadline_alert_job` runs daily and checks: (a) `recall_initiated` loans where the notice period expires within 24 hours → logs `"recall_deadline_24h"` notification for the agent; (b) `active` fixed-term loans maturing within 3 days → logs `"loan_maturity_3d"` notification for the agent.
+
+**Acceptance criteria:**
+- [ ] A `recall_initiated` loan with recall initiated 23 hours ago (recall notice = 1 day) triggers `"recall_deadline_24h"` notification.
+- [ ] A `recall_initiated` loan with 48+ hours remaining does not trigger the notification.
+- [ ] An `active` fixed-term loan with `maturity_date = today + 2 days` triggers `"loan_maturity_3d"` notification.
+- [ ] An `active` fixed-term loan with `maturity_date = today + 5 days` does not trigger the notification.
+- [ ] Open-term loans (`term_type = open`) do not trigger the maturity warning.
+- [ ] Job is idempotent: running twice in the same day does not send duplicate notifications.
+
+**Out of scope for this feature:** In-app notification bell UI; email delivery.
+
+---
+
+### F-048 — In-app notification list API and UI
+**Milestone:** M5
+**Depends on:** F-006, F-010
+**Actor(s):** Supplier, Agent
+
+**What it does:** `GET /notifications` returns the calling user's notifications ordered by `created_at` desc. `POST /notifications/{id}/read` marks a notification as read. UI shows a notification bell with unread count and a dropdown list.
+
+**Acceptance criteria:**
+- [ ] `GET /notifications` returns only notifications belonging to the calling user's `user_id`.
+- [ ] Response includes `event`, `payload` (JSONB), `created_at`, `read_at` (null if unread).
+- [ ] `POST /notifications/{id}/read` sets `read_at` to the current timestamp and returns HTTP 200.
+- [ ] UI notification bell shows the count of unread notifications.
+- [ ] Clicking a notification in the dropdown marks it as read.
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** Email delivery; push notifications; bulk mark-all-read.
+
+---
+
+## M6 — Accrual & Reporting
+
+---
+
+### F-049 — Accrual formula: unit tests for day count math
+**Milestone:** M6
+**Depends on:** F-033
+**Actor(s):** System
+
+**What it does:** Implements and unit-tests the `calculate_daily_accrual(rate_bps, quantity, day_count_basis)` pure function using both Actual/360 and Actual/365 conventions.
+
+**Acceptance criteria:**
+- [ ] `calculate_daily_accrual(rate_bps=500, quantity=10.0, basis="actual_360")` returns `10.0 × (500/10000) / 360` (= 0.001388...) to at least 8 decimal places.
+- [ ] `calculate_daily_accrual(rate_bps=500, quantity=10.0, basis="actual_365")` returns `10.0 × (500/10000) / 365` to at least 8 decimal places.
+- [ ] The function raises a `ValueError` for an unrecognized `day_count_basis`.
+- [ ] All tests pass with no floating-point precision failures (use `Decimal` arithmetic internally).
+
+**Out of scope for this feature:** Accrual job; DB storage; statement generation.
+
+---
+
+### F-050 — Accrual DB table and migration
+**Milestone:** M6
+**Depends on:** F-033
+**Actor(s):** System
+
+**What it does:** Adds the `accruals` Alembic migration with columns: `id`, `loan_id` (FK → loans), `accrual_date` (DATE), `quantity_outstanding`, `daily_interest`, `agent_fee`, `net_to_supplier`, `source_feed_id`, `feed_as_of`, `created_at`. Adds a UNIQUE constraint on `(loan_id, accrual_date)` to prevent duplicate accruals.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` applies; `downgrade -1` reverses cleanly.
+- [ ] Inserting two rows with the same `(loan_id, accrual_date)` raises a DB UNIQUE constraint violation.
+- [ ] `loan_id` FK enforces referential integrity.
+
+**Out of scope for this feature:** Statement table; accrual job.
+
+---
+
+### F-051 — Daily accrual background job
+**Milestone:** M6
+**Depends on:** F-049, F-050, F-007, F-008
+**Actor(s):** System
+
+**What it does:** ARQ job `daily_accrual_job` runs once per day (e.g., midnight UTC). For each `active` loan, pulls `quantity_outstanding` from `CustodianAdapter.get_inventory`, applies the day count formula, computes `agent_fee = daily_interest × (agent_fee_bps / 10000)`, `net_to_supplier = daily_interest - agent_fee`, and inserts an `Accrual` row for the current date.
+
+**Acceptance criteria:**
+- [ ] Running the job for a given date against one active loan creates exactly one `Accrual` row with correct `daily_interest`, `agent_fee`, and `net_to_supplier` values (verified against expected output of the formula from F-049).
+- [ ] Running the job again for the same date does not insert a duplicate row (idempotent due to UNIQUE constraint; error handled gracefully, no crash).
+- [ ] Loans in `pending`, `settled`, or `defaulted` state are skipped.
+- [ ] The `source_feed_id` and `feed_as_of` on each accrual row match the values returned by the mock inventory feed.
+- [ ] Job logs a summary: N loans processed, N accruals written.
+
+**Out of scope for this feature:** Statement generation; platform fee line item.
+
+---
+
+### F-052 — Accrual audit API endpoint
+**Milestone:** M6
+**Depends on:** F-051, F-005
+**Actor(s):** Supplier, Agent
+
+**What it does:** `GET /loans/{id}/accruals` returns all `Accrual` rows for a loan, ordered by `accrual_date` ascending. Access-controlled to orgs on the loan's connection.
+
+**Acceptance criteria:**
+- [ ] Returns HTTP 200 with a list of accrual records including `accrual_date`, `quantity_outstanding`, `daily_interest`, `agent_fee`, `net_to_supplier`, `source_feed_id`, `feed_as_of`.
+- [ ] Calling with a JWT from an unrelated org returns HTTP 403.
+- [ ] Filtering by `?from=YYYY-MM-DD&to=YYYY-MM-DD` returns only accruals within that range.
+
+**Out of scope for this feature:** Statement generation; CSV export.
+
+---
+
+### F-053 — Statement DB table and migration
+**Milestone:** M6
+**Depends on:** F-050
+**Actor(s):** System
+
+**What it does:** Adds the `statements` Alembic migration with columns: `id`, `connection_id` (FK), `period_start` (DATE), `period_end` (DATE), `gross_interest`, `agent_fee_total`, `net_to_supplier`, `locked_at`, `amendment_of` (FK → statements, nullable), `created_at`.
+
+**Acceptance criteria:**
+- [ ] `alembic upgrade head` applies; `downgrade -1` reverses cleanly.
+- [ ] `amendment_of` FK is self-referential and nullable.
+- [ ] `locked_at` defaults to `NULL` and is set only by the statement locking job.
+
+**Out of scope for this feature:** Statement generation job; download API.
+
+---
+
+### F-054 — Month-end statement generation and locking job
+**Milestone:** M6
+**Depends on:** F-051, F-053, F-007
+**Actor(s):** System
+
+**What it does:** ARQ job `monthly_statement_job` runs on the 1st of each month (or triggered by Admin). For each `Connection` with at least one accrual in the closed month, aggregates `SUM(daily_interest)`, `SUM(agent_fee)`, `SUM(net_to_supplier)` from `Accrual` rows for the period, creates a `Statement` row, and sets `locked_at` to the current timestamp.
+
+**Acceptance criteria:**
+- [ ] Running the job for a closed month with two active loans produces one `Statement` per connection containing the correct `gross_interest` (sum of all daily accruals), `agent_fee_total`, and `net_to_supplier`.
+- [ ] The generated statement has `locked_at` set to a non-null timestamp.
+- [ ] Running the job again for the same period does not create a duplicate statement (idempotent; detects existing locked statement for the period and skips).
+- [ ] A connection with no accruals in the period does not get a statement row.
+- [ ] The `period_start` and `period_end` values span the full closed calendar month (e.g., 2026-05-01 to 2026-05-31).
+
+**Out of scope for this feature:** Statement amendment flow; platform fee line item; payment tracking.
+
+---
+
+### F-055 — Statement amendment API
+**Milestone:** M6
+**Depends on:** F-054, F-005
+**Actor(s):** Admin
+
+**What it does:** `POST /statements/{id}/amend` (admin JWT). Creates a new `Statement` row with the corrected figures, sets `amendment_of = original_statement_id`, and locks it immediately. The original statement row is not modified.
+
+**Acceptance criteria:**
+- [ ] Admin calling `amend` on a locked statement creates a new `Statement` row with `amendment_of` pointing to the original.
+- [ ] The new statement has `locked_at` set immediately on creation.
+- [ ] The original statement row's `locked_at` and figures are unchanged.
+- [ ] Calling with a supplier or agent JWT returns HTTP 403.
+- [ ] `GET /connections/{id}/statements` lists both the original and the amendment, with the amendment clearly linked to the original via `amendment_of`.
+
+**Out of scope for this feature:** Amendment notification email; auto-detecting what changed.
+
+---
+
+### F-056 — Statement download and list API endpoints
+**Milestone:** M6
+**Depends on:** F-054, F-005
+**Actor(s):** Supplier, Agent
+
+**What it does:** `GET /connections/{id}/statements` lists all statements (locked and any amendments) for the connection. `GET /statements/{id}` returns full detail. Both are access-controlled. A `GET /statements/{id}/download` endpoint returns a JSON payload (or CSV) suitable for export.
+
+**Acceptance criteria:**
+- [ ] `GET /connections/{id}/statements` returns all statements for the connection, ordered by `period_start` desc.
+- [ ] Calling with a JWT from an unrelated org returns HTTP 403.
+- [ ] `GET /statements/{id}/download` returns a downloadable file (Content-Disposition header present) with all line items: gross interest, agent fee, net to supplier, per-loan breakdown, and period.
+- [ ] Amended statements appear in the list with an `amendment_of` field linking to the original.
+
+**Out of scope for this feature:** PDF rendering; tax document formatting; payment date tracking.
+
+---
+
+### F-057 — Reporting UI: accrual detail and monthly statement views
+**Milestone:** M6
+**Depends on:** F-052, F-056, F-010
+**Actor(s):** Supplier, Agent
+
+**What it does:** React pages for: (a) per-loan accrual table (date, quantity, daily interest, agent fee, net); (b) connection-level statements list; (c) statement detail with line-item breakdown and download button.
+
+**Acceptance criteria:**
+- [ ] Supplier can navigate to a connection and view the statements list with period, gross interest, agent fee, and net to supplier per row.
+- [ ] Clicking a statement opens a detail view with per-loan breakdown.
+- [ ] "Download" button triggers a file download of the statement data.
+- [ ] Amended statements are visually distinguished (e.g., "Amended" badge) and link to the original.
+- [ ] Per-loan accrual table accessible from the loan detail page, showing one row per accrual date.
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** Chart/graph views of earnings over time; tax document generation.
+
+---
+
+## Cross-cutting features
+
+---
+
+### F-058 — Admin: organization list and manual org approval API
+**Milestone:** M1
+**Depends on:** F-011, F-005
+**Actor(s):** Admin
+
+**What it does:** `GET /admin/orgs` (admin JWT) returns all organizations. `POST /admin/orgs/{id}/approve` and `POST /admin/orgs/{id}/reject` allow an admin to manage org registrations. (In MVP, orgs self-register and are auto-approved; this endpoint provides manual override capability.)
+
+**Acceptance criteria:**
+- [ ] `GET /admin/orgs` with admin JWT returns all org rows with `role`, `status`, `created_at`.
+- [ ] Calling with a non-admin JWT returns HTTP 403.
+- [ ] `POST /admin/orgs/{id}/approve` sets a status field on the org to `approved` and returns HTTP 200.
+- [ ] `POST /admin/orgs/{id}/reject` sets status to `rejected`.
+
+**Out of scope for this feature:** KYB/KYC verification provider integration; org suspension; billing management.
+
+---
+
+### F-059 — Admin: manual job trigger API
+**Milestone:** M6
+**Depends on:** F-051, F-054, F-005
+**Actor(s):** Admin
+
+**What it does:** `POST /admin/jobs/daily-accrual` and `POST /admin/jobs/monthly-statement` (admin JWT) enqueue the respective ARQ jobs immediately, bypassing the schedule. Returns the job ID.
+
+**Acceptance criteria:**
+- [ ] `POST /admin/jobs/daily-accrual` with admin JWT enqueues the job and returns HTTP 202 with `{ "job_id": "..." }`.
+- [ ] `POST /admin/jobs/monthly-statement` does the same for the statement job.
+- [ ] Calling with a non-admin JWT returns HTTP 403.
+- [ ] The enqueued job actually runs and produces results observable via the accrual or statement endpoints.
+
+**Out of scope for this feature:** Job history UI; job cancellation; retry controls.
+
+---
+
+### F-060 — OpenAPI spec and type-safe frontend API client
+**Milestone:** M0
+**Depends on:** F-001
+**Actor(s):** System (developer)
+
+**What it does:** Configures FastAPI to expose an OpenAPI schema at `/openapi.json`. Adds a `generate-client` script in the frontend that runs `openapi-typescript` to generate TypeScript types from the live schema, ensuring the frontend and backend share a single source of truth for request/response shapes.
+
+**Acceptance criteria:**
+- [ ] `GET http://localhost:8000/openapi.json` returns a valid OpenAPI 3.x JSON document.
+- [ ] Running `npm run generate-client` in the frontend directory produces a `src/api/types.ts` file with no TypeScript errors.
+- [ ] A sample API call in the frontend that uses the generated type compiles without casting to `any`.
+
+**Out of scope for this feature:** API versioning (`/v1/`); SDK publishing.
+
+---
+
+## Feature index by milestone
+
+| Milestone | Feature IDs |
+|---|---|
+| M0 — Foundation | F-001, F-002, F-003, F-004, F-005, F-006, F-007, F-008, F-009, F-010, F-060 |
+| M1 — Onboarding | F-011, F-012, F-013, F-014, F-015, F-016, F-017, F-018, F-019, F-058 |
+| M2 — Connection | F-020, F-021, F-022, F-023, F-024, F-025, F-026, F-027 |
+| M3 — Agreement | F-028, F-029, F-030, F-031, F-032 |
+| M4 — Loan lifecycle | F-033, F-034, F-035, F-036, F-037, F-038, F-039, F-040, F-041, F-042 |
+| M5 — Risk monitoring | F-043, F-044, F-045, F-046, F-047, F-048 |
+| M6 — Accrual & Reporting | F-049, F-050, F-051, F-052, F-053, F-054, F-055, F-056, F-057, F-059 |
