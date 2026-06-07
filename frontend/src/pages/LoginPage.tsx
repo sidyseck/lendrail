@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthContext';
 import { apiClient } from '@/api/client';
 import { Button } from '@/components/ui/button';
@@ -108,6 +108,21 @@ export function LoginPage() {
             {isLoading ? 'Signing in…' : 'Sign in'}
           </Button>
         </form>
+
+        <div className="mt-4 flex flex-col gap-2 text-center text-sm text-gray-500">
+          <p>
+            New supplier?{' '}
+            <Link to="/register/supplier" className="text-blue-600 hover:underline">
+              Register as Supplier
+            </Link>
+          </p>
+          <p>
+            New agent?{' '}
+            <Link to="/register/agent" className="text-blue-600 hover:underline">
+              Register as Agent
+            </Link>
+          </p>
+        </div>
       </div>
     </div>
   );

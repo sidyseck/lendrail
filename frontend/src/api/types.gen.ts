@@ -58,6 +58,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/orgs/register/supplier": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Register a new supplier organization */
+        post: operations["register_supplier"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/orgs/register/agent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Register a new agent organization */
+        post: operations["register_agent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/orgs/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get current organization */
+        get: operations["orgs_me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/borrowers/invite": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Invite a borrower */
+        post: operations["borrowers_invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/borrowers/{borrower_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get borrower by ID */
+        get: operations["borrowers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/me": {
         parameters: {
             query?: never;
@@ -115,6 +200,67 @@ export interface components {
              * @constant
              */
             token_type: "bearer";
+        };
+        /** OrgRegisterResponse */
+        OrgRegisterResponse: {
+            /**
+             * Org Id
+             * Format: uuid
+             */
+            org_id: string;
+            /** Access Token */
+            access_token: string;
+            /**
+             * Token Type
+             * @default bearer
+             * @constant
+             */
+            token_type: "bearer";
+        };
+        /** SupplierRegisterRequest */
+        SupplierRegisterRequest: {
+            /** Name */
+            name: string;
+            /** Jurisdiction */
+            jurisdiction: string;
+            /**
+             * Entity Type
+             * @enum {string}
+             */
+            entity_type: "fund" | "corporate_treasury" | "foundation";
+            /**
+             * Contact Email
+             * Format: email
+             */
+            contact_email: string;
+            /** Password */
+            password: string;
+        };
+        /** AgentRegisterRequest */
+        AgentRegisterRequest: {
+            /** Name */
+            name: string;
+            /** Jurisdiction */
+            jurisdiction: string;
+            /**
+             * Entity Type
+             * @enum {string}
+             */
+            entity_type: "fund" | "corporate_treasury" | "foundation";
+            /**
+             * Contact Email
+             * Format: email
+             */
+            contact_email: string;
+            /**
+             * Ops Contact Email
+             * Format: email
+             */
+            ops_contact_email: string;
+            /** Password */
+            password: string;
+            /** Regulatory Status Attested */
+            regulatory_status_attested: boolean;
         };
         /** ValidationError */
         ValidationError: {
@@ -192,6 +338,152 @@ export interface operations {
             query?: never;
             header?: never;
             path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    register_supplier: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SupplierRegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful registration */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgRegisterResponse"];
+                };
+            };
+            /** @description Duplicate email */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    register_agent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentRegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful registration */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgRegisterResponse"];
+                };
+            };
+            /** @description Duplicate email */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    orgs_me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    borrowers_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Invitation sent */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    borrowers_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                borrower_id: string;
+            };
             cookie?: never;
         };
         requestBody?: never;

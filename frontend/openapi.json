@@ -91,6 +91,120 @@
         }
       }
     },
+    "/orgs/register/supplier": {
+      "post": {
+        "tags": ["orgs"],
+        "summary": "Register a new supplier organization",
+        "operationId": "register_supplier",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SupplierRegisterRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful registration",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OrgRegisterResponse" }
+              }
+            }
+          },
+          "409": { "description": "Duplicate email" },
+          "422": { "description": "Validation error" }
+        }
+      }
+    },
+    "/orgs/register/agent": {
+      "post": {
+        "tags": ["orgs"],
+        "summary": "Register a new agent organization",
+        "operationId": "register_agent",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AgentRegisterRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful registration",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OrgRegisterResponse" }
+              }
+            }
+          },
+          "409": { "description": "Duplicate email" },
+          "422": { "description": "Validation error" }
+        }
+      }
+    },
+    "/orgs/me": {
+      "get": {
+        "tags": ["orgs"],
+        "summary": "Get current organization",
+        "operationId": "orgs_me",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/borrowers/invite": {
+      "post": {
+        "tags": ["borrowers"],
+        "summary": "Invite a borrower",
+        "operationId": "borrowers_invite",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": true }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Invitation sent" }
+        }
+      }
+    },
+    "/borrowers/{borrower_id}": {
+      "get": {
+        "tags": ["borrowers"],
+        "summary": "Get borrower by ID",
+        "operationId": "borrowers_get",
+        "parameters": [
+          {
+            "name": "borrower_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/me": {
       "get": {
         "tags": [
@@ -201,6 +315,62 @@
           "access_token"
         ],
         "title": "TokenResponse"
+      },
+      "OrgRegisterResponse": {
+        "properties": {
+          "org_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Org Id"
+          },
+          "access_token": {
+            "type": "string",
+            "title": "Access Token"
+          },
+          "token_type": {
+            "type": "string",
+            "const": "bearer",
+            "title": "Token Type",
+            "default": "bearer"
+          }
+        },
+        "type": "object",
+        "required": ["org_id", "access_token"],
+        "title": "OrgRegisterResponse"
+      },
+      "SupplierRegisterRequest": {
+        "properties": {
+          "name": { "type": "string", "title": "Name" },
+          "jurisdiction": { "type": "string", "title": "Jurisdiction" },
+          "entity_type": {
+            "type": "string",
+            "enum": ["fund", "corporate_treasury", "foundation"],
+            "title": "Entity Type"
+          },
+          "contact_email": { "type": "string", "format": "email", "title": "Contact Email" },
+          "password": { "type": "string", "minLength": 12, "title": "Password" }
+        },
+        "type": "object",
+        "required": ["name", "jurisdiction", "entity_type", "contact_email", "password"],
+        "title": "SupplierRegisterRequest"
+      },
+      "AgentRegisterRequest": {
+        "properties": {
+          "name": { "type": "string", "title": "Name" },
+          "jurisdiction": { "type": "string", "title": "Jurisdiction" },
+          "entity_type": {
+            "type": "string",
+            "enum": ["fund", "corporate_treasury", "foundation"],
+            "title": "Entity Type"
+          },
+          "contact_email": { "type": "string", "format": "email", "title": "Contact Email" },
+          "ops_contact_email": { "type": "string", "format": "email", "title": "Ops Contact Email" },
+          "password": { "type": "string", "minLength": 12, "title": "Password" },
+          "regulatory_status_attested": { "type": "boolean", "title": "Regulatory Status Attested" }
+        },
+        "type": "object",
+        "required": ["name", "jurisdiction", "entity_type", "contact_email", "ops_contact_email", "password", "regulatory_status_attested"],
+        "title": "AgentRegisterRequest"
       },
       "ValidationError": {
         "properties": {
