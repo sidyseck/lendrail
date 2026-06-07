@@ -3,21 +3,21 @@
 | Field | Value |
 |---|---|
 | Milestone | M1 — Onboarding (frontend only) |
-| Version | rev 1 |
+| Version | rev 2 |
 | Date | 2026-06-07 |
-| Status | Draft — awaiting tech-lead and backend cross-review |
+| Status | Draft rev 2 — awaiting final tech-lead cross-review |
 | Author | Frontend engineering |
 | Covers | F-014 (Supplier registration UI), F-016 (Agent registration UI) |
 | Architecture ref | ARCHITECTURE.md v0.2 |
 | PRD ref | MASTER_PRD.md v0.1 |
 | M0 spec ref | specs/M0-frontend-techspec.md (rev 2) |
-| Backend contract ref | specs/M1-backend-techspec.md |
+| Backend contract ref | specs/M1-backend-techspec.md (rev 2) |
 
 ---
 
 ## §1 — Overview and Scope
 
-This spec covers the two M1 frontend deliverables. Both depend on the M0 scaffold (F-010) and the M1 backend registration endpoint (F-013/F-015 via `POST /orgs/register`).
+This spec covers the two M1 frontend deliverables. Both depend on the M0 scaffold (F-010) and the M1 backend registration endpoints (F-013 via `POST /orgs/register/supplier` and F-015 via `POST /orgs/register/agent`).
 
 **F-014 — Supplier registration UI**
 
@@ -92,7 +92,7 @@ export default function App() {
 
 | File | Purpose |
 |---|---|
-| `src/mocks/handlers/register.ts` | MSW handlers for `POST /api/orgs/register` (success, 409, 422) |
+| `src/mocks/handlers/register.ts` | MSW handlers for `POST /api/orgs/register/supplier` and `POST /api/orgs/register/agent` (success, 409, 422) |
 
 ### §2.4 — New test files in `src/test/`
 
@@ -107,7 +107,7 @@ export default function App() {
 
 ### §2.6 — Updated `frontend/openapi.json` and `src/api/types.gen.ts`
 
-The `POST /orgs/register` endpoint with both request variants and the `OrgRegisterResponse` type must be added. See §8.
+The two registration endpoints (`POST /orgs/register/supplier` and `POST /orgs/register/agent`) with their respective request models and the `OrgRegisterResponse` type must be added. See §8.
 
 ---
 
@@ -141,16 +141,18 @@ export function validateEmail(value: string, fieldLabel: string): string | null 
 
 export function validatePassword(value: string): string | null {
   if (value.length === 0) return 'Password is required';
-  if (value.length < 8) return 'Password must be at least 8 characters';
+  if (value.length < 12) return 'Password must be at least 12 characters';
   return null;
 }
 ```
 
 **Notes:**
-- No password strength scoring is required by the acceptance criteria. The minimum-length check (≥8 chars) matches the backend's `min_length=8` constraint (M1-backend-techspec §7.1).
+- No password strength scoring is required by the acceptance criteria. The minimum-length check (≥12 chars) matches the backend's `min_length=12` constraint (M1-backend-techspec rev 2 §7.1 — Decision 7: raised from 8 to 12 characters).
 - `validateEmail` intentionally does not call the backend to check availability — that is handled by the 409 error flow.
 
 ### §3.2 — `src/hooks/useRegistrationForm.ts`
+
+The hook accepts the target endpoint URL as a parameter so `SupplierRegisterPage` and `AgentRegisterPage` each POST to their own dedicated endpoint. All 422 responses use the standard `{"error": {"code": "...", "message": "..."}}` envelope — the backend's global `RequestValidationError` handler (backend spec rev 2 §7.6) ensures this. No dual-format handling is needed.
 
 ```ts
 import { useState } from 'react';
@@ -168,16 +170,22 @@ export interface UseRegistrationFormReturn {
   isLoading: boolean;
   serverError: string | null;
   /**
-   * Call this with the POST /orgs/register payload once client-side
+   * Call this with the endpoint path and POST payload once client-side
    * validation has already passed. The hook handles:
    *   - setting isLoading
    *   - calling AuthContext.login() with the returned token
    *   - navigating to /dashboard on success
    *   - mapping 409 → "Email already registered"
-   *   - mapping 422 → backend message or generic fallback
+   *   - mapping 422 → backend envelope message or generic fallback
    *   - clearing serverError before each attempt
+   *
+   * All 422 responses use the standard {"error": {"code": "...", "message": "..."}}
+   * envelope (backend global RequestValidationError handler — backend spec rev 2 §7.6).
    */
-  submitRegistration: (payload: Record<string, unknown>) => Promise<void>;
+  submitRegistration: (
+    endpoint: '/orgs/register/supplier' | '/orgs/register/agent',
+    payload: Record<string, unknown>,
+  ) => Promise<void>;
 }
 
 export function useRegistrationForm(): UseRegistrationFormReturn {
@@ -186,12 +194,15 @@ export function useRegistrationForm(): UseRegistrationFormReturn {
   const [isLoading, setIsLoading] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
 
-  async function submitRegistration(payload: Record<string, unknown>): Promise<void> {
+  async function submitRegistration(
+    endpoint: '/orgs/register/supplier' | '/orgs/register/agent',
+    payload: Record<string, unknown>,
+  ): Promise<void> {
     setServerError(null);
     setIsLoading(true);
 
     try {
-      const { data, error: apiError, response } = await apiClient.POST('/orgs/register', {
+      const { data, error: apiError, response } = await apiClient.POST(endpoint, {
         body: payload as never,
       });
 
@@ -203,17 +214,12 @@ export function useRegistrationForm(): UseRegistrationFormReturn {
       }
 
       if (response.status === 422) {
-        // Backend may return Pydantic validation errors ({ detail: [...] }) or
-        // a domain ValidationError envelope ({ error: { code, message } }).
-        // Extract a readable message from whichever shape arrives.
-        const errBody = apiError as {
-          error?: { message?: string };
-          detail?: Array<{ msg: string }>;
-        } | undefined;
+        // All 422s from the backend use the standard envelope:
+        // { error: { code: "validation_error" | "attestation_required" | ..., message: "..." } }
+        // The backend's global RequestValidationError handler guarantees this shape.
+        const errBody = apiError as { error?: { message?: string } } | undefined;
         const msg =
-          errBody?.error?.message ??
-          errBody?.detail?.[0]?.msg ??
-          'Validation failed. Please check your inputs.';
+          errBody?.error?.message ?? 'Validation failed. Please check your inputs.';
         setServerError(msg);
         return;
       }
@@ -243,7 +249,9 @@ export function useRegistrationForm(): UseRegistrationFormReturn {
 
 | Decision | Rationale |
 |---|---|
+| Hook takes an `endpoint` parameter | Each registration page posts to its own dedicated endpoint (`/orgs/register/supplier` or `/orgs/register/agent`). The endpoint encodes the role — no `role` field is sent in the payload. |
 | Hook takes `Record<string, unknown>` payload | Avoids coupling the generic hook to the specific schema of either registration variant; the page is responsible for constructing the correctly typed payload before calling. |
+| Single-format 422 handling | The backend's global `RequestValidationError` handler (backend spec rev 2 §7.6) guarantees all 422s use `{"error": {"code": "...", "message": "..."}}`. No `detail` array fallback is needed. |
 | 409 always maps to "Email already registered" | FEATURES.md F-014 acceptance criterion specifies this exact user-readable string. The backend `code="duplicate_email"` message is not shown to the user. |
 | JWT stored via `login()` not `localStorage` | Hard constraint from M0 spec. `AuthContext.login()` calls `tokenStore.setToken()`. |
 | No `?next=` redirect after registration | Registration is always followed by `/dashboard`. There is no "interrupted navigation" scenario for a new user with no prior destination. |
@@ -276,7 +284,7 @@ SupplierRegisterPage
 | `jurisdiction` | `type="text"` | "Jurisdiction" | Required, non-empty after trim | "Jurisdiction is required" |
 | `entity_type` | `<select>` | "Entity type" | Required; value must be one of the three options | "Entity type is required" |
 | `contact_email` | `type="email"` | "Primary contact email" | Required, valid email format | "Primary contact email is required" / "Primary contact email must be a valid email address" |
-| `password` | `type="password"` | "Password" | Required, ≥ 8 characters | "Password is required" / "Password must be at least 8 characters" |
+| `password` | `type="password"` | "Password" | Required, ≥ 12 characters | "Password is required" / "Password must be at least 12 characters" |
 
 **Entity type dropdown options — exactly:**
 
@@ -289,7 +297,7 @@ SupplierRegisterPage
 
 The `value` attributes sent to the backend are the snake_case API values. The display labels are human-readable. The option `value=""` is the placeholder and is considered an empty/unselected state for validation.
 
-**Constraint:** The three values (`fund`, `corporate_treasury`, `foundation`) are exactly what the backend `entity_type_enum` accepts for suppliers, and exactly what FEATURES.md F-014 acceptance criterion requires. The `agent` enum value is never offered in this dropdown.
+**Constraint:** The three values (`fund`, `corporate_treasury`, `foundation`) are exactly what the backend `EntityType` Pydantic literal accepts for the supplier endpoint (backend spec rev 2 §7.1). The `agent` enum value is intentionally absent from this dropdown — it is excluded from the public schema (Decision 8 in backend review).
 
 ### §4.3 — Validation Strategy
 
@@ -316,13 +324,12 @@ if (Object.keys(errors).length > 0) {
 }
 ```
 
-### §4.4 — POST /orgs/register Payload Shape
+### §4.4 — POST /orgs/register/supplier Payload Shape
 
-The exact request body sent to the backend. Field names must match the backend `SupplierRegisterRequest` Pydantic model (M1-backend-techspec §7.1).
+The exact request body sent to `POST /api/orgs/register/supplier`. Field names must match the backend `SupplierRegisterRequest` Pydantic model (M1-backend-techspec rev 2 §7.1). The endpoint itself encodes the role — no `role` field is included in the payload.
 
 ```json
 {
-  "role": "supplier",
   "name": "<legal name>",
   "jurisdiction": "<jurisdiction>",
   "entity_type": "fund" | "corporate_treasury" | "foundation",
@@ -331,11 +338,9 @@ The exact request body sent to the backend. Field names must match the backend `
 }
 ```
 
-`role` is hardcoded to `"supplier"` in the supplier page. It is not a user-controlled field.
-
 ### §4.5 — Success Flow
 
-1. `POST /orgs/register` returns HTTP 201.
+1. `POST /api/orgs/register/supplier` returns HTTP 201.
 2. Response body: `{ "org_id": "<uuid>", "access_token": "<jwt>", "token_type": "bearer" }`.
 3. `useRegistrationForm` calls `AuthContext.login(access_token)` — stores token in `tokenStore`, sets `isAuthenticated = true`, `role = "supplier"`, `orgId = org_id`.
 4. `navigate('/dashboard', { replace: true })`.
@@ -346,7 +351,7 @@ The exact request body sent to the backend. Field names must match the backend `
 | Scenario | HTTP status | User-visible message | Location |
 |---|---|---|---|
 | Duplicate email | 409 | "Email already registered" | `<p role="alert">` below all fields, above submit button |
-| Backend validation failure | 422 | Extracted from `error.message` or `detail[0].msg` or generic fallback | Same `<p role="alert">` |
+| Backend validation failure | 422 | Extracted from `error.message` or generic fallback | Same `<p role="alert">` |
 | Network error / unexpected | — | "An unexpected error occurred. Please try again." | Same `<p role="alert">` |
 | Client-side validation failure | — (no network call) | Field-specific inline errors | Below each invalid input |
 
@@ -405,8 +410,7 @@ export function SupplierRegisterPage() {
     }
     setFieldErrors({});
 
-    await submitRegistration({
-      role: 'supplier',
+    await submitRegistration('/orgs/register/supplier', {
       name: name.trim(),
       jurisdiction: jurisdiction.trim(),
       entity_type: entityType,
@@ -565,7 +569,7 @@ AgentRegisterPage
 └── <form onSubmit={handleSubmit} noValidate>
     ├── FormField: Entity name (text)
     ├── FormField: Jurisdiction (text)
-    ├── FormField: Entity type (dropdown)    → only "Agent" option
+    ├── FormField: Entity type (dropdown)    → Fund / Corporate Treasury / Foundation
     ├── FormField: Primary contact email
     ├── FormField: Ops/settlement contact email
     ├── FormField: Password
@@ -580,13 +584,22 @@ AgentRegisterPage
 |---|---|---|---|---|
 | `name` | `type="text"` | "Entity name" | Required, non-empty after trim | "Entity name is required" |
 | `jurisdiction` | `type="text"` | "Jurisdiction" | Required, non-empty after trim | "Jurisdiction is required" |
-| `entity_type` | `<select>` (single option) | "Entity type" | Always `"agent"`; no user selection needed — rendered as a read-only select or disabled field | n/a (auto-set) |
+| `entity_type` | `<select>` | "Entity type" | Required; value must be one of Fund / Corporate Treasury / Foundation | "Entity type is required" |
 | `contact_email` | `type="email"` | "Primary contact email" | Required, valid email format | "Primary contact email is required" / "must be a valid email address" |
 | `ops_contact_email` | `type="email"` | "Ops/settlement contact email" | Required, valid email format | "Ops/settlement contact email is required" / "must be a valid email address" |
-| `password` | `type="password"` | "Password" | Required, ≥ 8 characters | "Password is required" / "Password must be at least 8 characters" |
+| `password` | `type="password"` | "Password" | Required, ≥ 12 characters | "Password is required" / "Password must be at least 12 characters" |
 | `regulatory_status_attested` | `type="checkbox"` | See below | Must be checked; validated client-side before submit | "You must attest to your regulatory status to continue" |
 
-**Entity type for agents:** The backend `entity_type_enum` includes `"agent"` as a valid value for agent orgs (M1-backend-techspec §3.1). The agent registration page sends `entity_type: "agent"` unconditionally. The dropdown renders a single, pre-selected, disabled option (`<option value="agent">Agent</option>`) to show the user their entity type without allowing them to change it. `entity_type` is not user-editable on the agent form.
+**Entity type for agent registration:** Per backend spec rev 2 Decision 8, the public `EntityType` Pydantic literal is `"fund" | "corporate_treasury" | "foundation"` for both registration endpoints. Agent orgs pick one of these three entity types. The `"agent"` value is excluded from the public schema (the DB ENUM retains it for future internal use). The agent registration page therefore renders the same three-option dropdown as the supplier page. `entity_type` is a required user-selection on the agent form.
+
+**Entity type dropdown options — exactly:**
+
+```
+<option value="">Select entity type</option>
+<option value="fund">Fund</option>
+<option value="corporate_treasury">Corporate Treasury</option>
+<option value="foundation">Foundation</option>
+```
 
 **Attestation checkbox label text:**
 
@@ -612,16 +625,15 @@ The error renders inline below the checkbox. The network call (`submitRegistrati
 
 The backend also validates this field (`regulatory_status_attested=false` → HTTP 422 with `code="attestation_required"`), but this is belt-and-suspenders. The client-side check is the primary guard.
 
-### §5.4 — POST /orgs/register Payload Shape
+### §5.4 — POST /orgs/register/agent Payload Shape
 
-The exact request body sent to the backend. Field names must match the backend `AgentRegisterRequest` Pydantic model (M1-backend-techspec §7.1).
+The exact request body sent to `POST /api/orgs/register/agent`. Field names must match the backend `AgentRegisterRequest` Pydantic model (M1-backend-techspec rev 2 §7.1). The endpoint itself encodes the role — no `role` field is included in the payload.
 
 ```json
 {
-  "role": "agent",
   "name": "<entity name>",
   "jurisdiction": "<jurisdiction>",
-  "entity_type": "agent",
+  "entity_type": "fund" | "corporate_treasury" | "foundation",
   "contact_email": "<primary email>",
   "ops_contact_email": "<ops/settlement email>",
   "password": "<password>",
@@ -629,7 +641,7 @@ The exact request body sent to the backend. Field names must match the backend `
 }
 ```
 
-`role` is hardcoded to `"agent"`. `entity_type` is hardcoded to `"agent"`. `regulatory_status_attested` is sent as `true` (it was validated as checked before reaching the network call; a `false` value never reaches the hook).
+`entity_type` is the user's dropdown selection (one of the three valid values). `regulatory_status_attested` is sent as `true` (it was validated as checked before reaching the network call; a `false` value never reaches the hook).
 
 ### §5.5 — Success and Error Flows
 
@@ -649,9 +661,15 @@ import { useRegistrationForm } from '@/hooks/useRegistrationForm';
 import { validateEmail, validatePassword, validateRequired } from '@/lib/validators';
 
 type FieldErrors = Partial<Record<
-  'name' | 'jurisdiction' | 'contactEmail' | 'opsContactEmail' | 'password' | 'attestation',
+  'name' | 'jurisdiction' | 'entityType' | 'contactEmail' | 'opsContactEmail' | 'password' | 'attestation',
   string
 >>;
+
+const ENTITY_TYPE_OPTIONS = [
+  { value: 'fund', label: 'Fund' },
+  { value: 'corporate_treasury', label: 'Corporate Treasury' },
+  { value: 'foundation', label: 'Foundation' },
+] as const;
 
 const ATTESTATION_TEXT =
   'I confirm that my organization is registered with, and in good standing with, ' +
@@ -663,6 +681,7 @@ export function AgentRegisterPage() {
 
   const [name, setName] = useState('');
   const [jurisdiction, setJurisdiction] = useState('');
+  const [entityType, setEntityType] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [opsContactEmail, setOpsContactEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -677,6 +696,7 @@ export function AgentRegisterPage() {
     if (nameErr) errors.name = nameErr;
     const jurisdictionErr = validateRequired(jurisdiction, 'Jurisdiction');
     if (jurisdictionErr) errors.jurisdiction = jurisdictionErr;
+    if (!entityType) errors.entityType = 'Entity type is required';
     const emailErr = validateEmail(contactEmail, 'Primary contact email');
     if (emailErr) errors.contactEmail = emailErr;
     const opsEmailErr = validateEmail(opsContactEmail, 'Ops/settlement contact email');
@@ -694,11 +714,10 @@ export function AgentRegisterPage() {
     }
     setFieldErrors({});
 
-    await submitRegistration({
-      role: 'agent',
+    await submitRegistration('/orgs/register/agent', {
       name: name.trim(),
       jurisdiction: jurisdiction.trim(),
-      entity_type: 'agent',
+      entity_type: entityType,
       contact_email: contactEmail.trim(),
       ops_contact_email: opsContactEmail.trim(),
       password,
@@ -755,17 +774,29 @@ export function AgentRegisterPage() {
             )}
           </div>
 
-          {/* Entity type — read-only for agents */}
+          {/* Entity type dropdown */}
           <div className="space-y-1">
             <Label htmlFor="entity-type">Entity type</Label>
             <select
               id="entity-type"
-              value="agent"
-              disabled
-              className="w-full rounded-md border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-500 cursor-not-allowed"
+              value={entityType}
+              onChange={(e) => setEntityType(e.target.value)}
+              disabled={isLoading}
+              aria-describedby={fieldErrors.entityType ? 'entity-type-error' : undefined}
+              className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <option value="agent">Agent</option>
+              <option value="">Select entity type</option>
+              {ENTITY_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
             </select>
+            {fieldErrors.entityType && (
+              <p id="entity-type-error" className="text-sm text-red-600">
+                {fieldErrors.entityType}
+              </p>
+            )}
           </div>
 
           {/* Primary contact email */}
@@ -871,6 +902,7 @@ export function AgentRegisterPage() {
 |---|---|
 | Error when attestation checkbox unchecked on submit | `handleSubmit` checks `!attested`; sets `fieldErrors.attestation`; renders inline error; network call never made |
 | Ops/settlement contact email field is present and required | `opsContactEmail` field with `validateEmail` guard; blocks submit if empty or invalid format |
+| `entity_type` dropdown offers Fund, Corporate Treasury, Foundation | Same `ENTITY_TYPE_OPTIONS` const as supplier page; "agent" value is excluded per backend Decision 8 |
 | Successful submission stores JWT and navigates to `/dashboard` | Same as supplier: `useRegistrationForm.submitRegistration` → `login()` → `navigate('/dashboard')` |
 | TypeScript compiles with zero errors | All state and event types explicit; `FieldErrors` typed; `ATTESTATION_TEXT` is a `const string` |
 
@@ -880,7 +912,7 @@ export function AgentRegisterPage() {
 
 ### §6.1 — New Handler File: `src/mocks/handlers/register.ts`
 
-This file must cover all test scenarios for both pages. The handler intercepts `POST /api/orgs/register` and dispatches on the `role` field, matching the exact backend dispatch logic.
+This file covers all test scenarios for both pages using two separate handlers — one per endpoint — matching the backend's split endpoint structure. There is no `role`-field dispatch; the endpoint path encodes the role.
 
 ```ts
 // src/mocks/handlers/register.ts
@@ -908,57 +940,61 @@ const DUPLICATE_EMAIL = 'duplicate@lendrail.test';
 const TRIGGER_422_EMAIL = 'invalid422@lendrail.test';
 
 export const registerHandlers = [
-  http.post('/api/orgs/register', async ({ request }) => {
+  // POST /api/orgs/register/supplier
+  http.post('/api/orgs/register/supplier', async ({ request }) => {
     await delay(20); // Artificial latency to allow testing loading state.
 
     const body = (await request.json()) as Record<string, unknown>;
-    const role = body.role as string | undefined;
 
-    // 409 — duplicate email (applies to both supplier and agent)
     if (body.contact_email === DUPLICATE_EMAIL) {
-      return mockError('duplicate_email', "An organization with that email already exists", 409);
+      return mockError('duplicate_email', 'An organization with that email already exists', 409);
     }
 
-    // 422 — simulate a backend validation error
     if (body.contact_email === TRIGGER_422_EMAIL) {
       return mockError('validation_error', 'Validation failed on one or more fields', 422);
     }
 
-    if (role === 'supplier') {
-      // Supplier success
-      return HttpResponse.json(
-        {
-          org_id: 'org-003',
-          access_token: SUPPLIER_REG_TOKEN,
-          token_type: 'bearer',
-        },
-        { status: 201 },
+    return HttpResponse.json(
+      {
+        org_id: 'org-003',
+        access_token: SUPPLIER_REG_TOKEN,
+        token_type: 'bearer',
+      },
+      { status: 201 },
+    );
+  }),
+
+  // POST /api/orgs/register/agent
+  http.post('/api/orgs/register/agent', async ({ request }) => {
+    await delay(20);
+
+    const body = (await request.json()) as Record<string, unknown>;
+
+    if (body.contact_email === DUPLICATE_EMAIL) {
+      return mockError('duplicate_email', 'An organization with that email already exists', 409);
+    }
+
+    if (body.contact_email === TRIGGER_422_EMAIL) {
+      return mockError('validation_error', 'Validation failed on one or more fields', 422);
+    }
+
+    // Belt-and-suspenders: attestation=false → 422 (client-side guard should prevent this)
+    if (body.regulatory_status_attested === false) {
+      return mockError(
+        'attestation_required',
+        'Regulatory status attestation is required for agent registration',
+        422,
       );
     }
 
-    if (role === 'agent') {
-      // Agent: attestation=false → 422 (belt-and-suspenders for any test that bypasses
-      // client-side validation and sends false directly)
-      if (body.regulatory_status_attested === false) {
-        return mockError(
-          'attestation_required',
-          'Regulatory status attestation is required for agent registration',
-          422,
-        );
-      }
-      // Agent success
-      return HttpResponse.json(
-        {
-          org_id: 'org-004',
-          access_token: AGENT_REG_TOKEN,
-          token_type: 'bearer',
-        },
-        { status: 201 },
-      );
-    }
-
-    // Unknown role — return 422
-    return mockError('invalid_role', 'Unknown registration role', 422);
+    return HttpResponse.json(
+      {
+        org_id: 'org-004',
+        access_token: AGENT_REG_TOKEN,
+        token_type: 'bearer',
+      },
+      { status: 201 },
+    );
   }),
 ];
 ```
@@ -991,6 +1027,8 @@ export const server = setupServer(...authHandlers, ...registerHandlers);
 
 Both test files follow the M0 test patterns exactly: `MemoryRouter`, `useNavigate` mocked with `vi.fn()`, `AuthProvider` wrapper, `userEvent.setup()`, `waitFor` for async assertions. MSW server lifecycle is managed in `src/test/setup.ts` (already in place from M0).
 
+Password fixtures use 12+ character passwords throughout to match the backend's `min_length=12` constraint (Decision 7).
+
 ### §7.1 — `src/test/SupplierRegisterPage.test.tsx`
 
 ```tsx
@@ -1019,13 +1057,13 @@ function renderPage() {
   );
 }
 
-// Helper: fill all valid fields
+// Helper: fill all valid fields with a 12+ char password
 async function fillValidForm(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText(/legal name/i), 'Acme Fund');
   await user.type(screen.getByLabelText(/jurisdiction/i), 'Delaware, USA');
   await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
   await user.type(screen.getByLabelText(/primary contact email/i), 'acme@example.com');
-  await user.type(screen.getByLabelText(/password/i), 'password123');
+  await user.type(screen.getByLabelText(/password/i), 'Acme@Str0ng!2026');
 }
 
 describe('SupplierRegisterPage', () => {
@@ -1064,12 +1102,12 @@ describe('SupplierRegisterPage', () => {
     expect(screen.getByText(/must be a valid email address/i)).toBeInTheDocument();
   });
 
-  it('shows password length error for a password shorter than 8 characters', async () => {
+  it('shows password length error for a password shorter than 12 characters', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.type(screen.getByLabelText(/password/i), 'abc');
+    await user.type(screen.getByLabelText(/password/i), 'short1234');
     await user.click(screen.getByRole('button', { name: /create supplier account/i }));
-    expect(screen.getByText(/at least 8 characters/i)).toBeInTheDocument();
+    expect(screen.getByText(/at least 12 characters/i)).toBeInTheDocument();
   });
 
   // F-014: entity_type dropdown options
@@ -1115,12 +1153,11 @@ describe('SupplierRegisterPage', () => {
   it('shows "Email already registered" for a duplicate email (409)', async () => {
     const user = userEvent.setup();
     renderPage();
-    // Use the email that MSW maps to a 409 response
     await user.type(screen.getByLabelText(/legal name/i), 'Acme Fund');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'Delaware, USA');
     await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'duplicate@lendrail.test');
-    await user.type(screen.getByLabelText(/password/i), 'password123');
+    await user.type(screen.getByLabelText(/password/i), 'Acme@Str0ng!2026');
     await user.click(screen.getByRole('button', { name: /create supplier account/i }));
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent('Email already registered');
@@ -1128,7 +1165,7 @@ describe('SupplierRegisterPage', () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  // F-014: 422 validation error from backend
+  // F-014: 422 validation error from backend (standard envelope)
 
   it('shows a server error message for a 422 response', async () => {
     const user = userEvent.setup();
@@ -1137,7 +1174,7 @@ describe('SupplierRegisterPage', () => {
     await user.type(screen.getByLabelText(/jurisdiction/i), 'Delaware, USA');
     await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'invalid422@lendrail.test');
-    await user.type(screen.getByLabelText(/password/i), 'password123');
+    await user.type(screen.getByLabelText(/password/i), 'Acme@Str0ng!2026');
     await user.click(screen.getByRole('button', { name: /create supplier account/i }));
     await waitFor(() => {
       expect(screen.getByRole('alert')).toBeInTheDocument();
@@ -1178,9 +1215,10 @@ function renderPage() {
 async function fillValidForm(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
   await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
+  await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
   await user.type(screen.getByLabelText(/primary contact email/i), 'atlas@example.com');
   await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'ops@example.com');
-  await user.type(screen.getByLabelText(/password/i), 'password123');
+  await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
   await user.click(screen.getByLabelText(/i confirm that my organization/i));
 }
 
@@ -1198,6 +1236,21 @@ describe('AgentRegisterPage', () => {
     expect(screen.getByLabelText(/i confirm that my organization/i)).toBeInTheDocument();
   });
 
+  // F-016: entity type dropdown options
+
+  it('entity type dropdown offers exactly Fund, Corporate Treasury, Foundation', () => {
+    renderPage();
+    const select = screen.getByLabelText(/entity type/i);
+    const options = Array.from((select as HTMLSelectElement).options).map((o) => ({
+      value: o.value,
+      text: o.text,
+    }));
+    expect(options[1]).toEqual({ value: 'fund', text: 'Fund' });
+    expect(options[2]).toEqual({ value: 'corporate_treasury', text: 'Corporate Treasury' });
+    expect(options[3]).toEqual({ value: 'foundation', text: 'Foundation' });
+    expect(options).toHaveLength(4);
+  });
+
   // F-016: attestation checkbox must be checked before submit
 
   it('shows attestation error when checkbox is unchecked and form is otherwise valid', async () => {
@@ -1206,9 +1259,10 @@ describe('AgentRegisterPage', () => {
     // Fill all text fields validly but do not check the attestation box
     await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
+    await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'atlas@example.com');
     await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'ops@example.com');
-    await user.type(screen.getByLabelText(/password/i), 'password123');
+    await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
     // Do NOT click the attestation checkbox
     await user.click(screen.getByRole('button', { name: /create agent account/i }));
     expect(
@@ -1225,9 +1279,10 @@ describe('AgentRegisterPage', () => {
     renderPage();
     await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
+    await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'atlas@example.com');
     await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'ops@example.com');
-    await user.type(screen.getByLabelText(/password/i), 'password123');
+    await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
     await user.click(screen.getByRole('button', { name: /create agent account/i }));
     // If a network call was made and the handler was missing, vitest would throw.
     // Reaching this line means no network call was made.
@@ -1241,9 +1296,10 @@ describe('AgentRegisterPage', () => {
     renderPage();
     await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
+    await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'atlas@example.com');
     // Leave ops email empty
-    await user.type(screen.getByLabelText(/password/i), 'password123');
+    await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
     await user.click(screen.getByLabelText(/i confirm that my organization/i));
     await user.click(screen.getByRole('button', { name: /create agent account/i }));
     expect(
@@ -1287,9 +1343,10 @@ describe('AgentRegisterPage', () => {
     renderPage();
     await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
+    await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'duplicate@lendrail.test');
     await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'ops@example.com');
-    await user.type(screen.getByLabelText(/password/i), 'password123');
+    await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
     await user.click(screen.getByLabelText(/i confirm that my organization/i));
     await user.click(screen.getByRole('button', { name: /create agent account/i }));
     await waitFor(() => {
@@ -1298,31 +1355,23 @@ describe('AgentRegisterPage', () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  // F-016: 422 validation error
+  // F-016: 422 validation error (standard envelope)
 
   it('shows a server error for a 422 response', async () => {
     const user = userEvent.setup();
     renderPage();
     await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
+    await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'invalid422@lendrail.test');
     await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'ops@example.com');
-    await user.type(screen.getByLabelText(/password/i), 'password123');
+    await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
     await user.click(screen.getByLabelText(/i confirm that my organization/i));
     await user.click(screen.getByRole('button', { name: /create agent account/i }));
     await waitFor(() => {
       expect(screen.getByRole('alert')).toBeInTheDocument();
     });
     expect(mockNavigate).not.toHaveBeenCalled();
-  });
-
-  // Entity type field is always "Agent" and not user-editable
-
-  it('entity type field is pre-set to "Agent" and disabled', () => {
-    renderPage();
-    const select = screen.getByLabelText(/entity type/i) as HTMLSelectElement;
-    expect(select.value).toBe('agent');
-    expect(select.disabled).toBe(true);
   });
 });
 ```
@@ -1333,21 +1382,48 @@ describe('AgentRegisterPage', () => {
 
 ### §8.1 — Changes Required in `frontend/openapi.json`
 
-The backend `POST /orgs/register` endpoint must be added to the committed schema file. The backend team must provide the exact OpenAPI path item from the FastAPI-generated `/openapi.json`. The frontend team commits this to `frontend/openapi.json` and regenerates types.
+The two backend registration endpoints must be added to the committed schema file. With the discriminated-union approach eliminated (backend spec rev 2 — D-1 RESOLVED), each endpoint has a straightforward, individually typed `requestBody`. There is no union workaround needed.
 
-The minimum additions required to `frontend/openapi.json`:
+The backend team must provide the exact OpenAPI path items from the FastAPI-generated `/openapi.json`. The frontend team commits these to `frontend/openapi.json` and regenerates types.
 
-**New path item:**
+**New path items:**
+
 ```json
-"/orgs/register": {
+"/orgs/register/supplier": {
   "post": {
-    "operationId": "register_org",
-    "summary": "Register a new organization (supplier or agent)",
+    "operationId": "register_supplier",
+    "summary": "Register a new supplier organization",
     "requestBody": {
       "required": true,
       "content": {
         "application/json": {
-          "schema": { "$ref": "#/components/schemas/OrgRegisterRequest" }
+          "schema": { "$ref": "#/components/schemas/SupplierRegisterRequest" }
+        }
+      }
+    },
+    "responses": {
+      "201": {
+        "description": "Successful registration",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/OrgRegisterResponse" }
+          }
+        }
+      },
+      "409": { "description": "Duplicate email" },
+      "422": { "description": "Validation error" }
+    }
+  }
+},
+"/orgs/register/agent": {
+  "post": {
+    "operationId": "register_agent",
+    "summary": "Register a new agent organization",
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": { "$ref": "#/components/schemas/AgentRegisterRequest" }
         }
       }
     },
@@ -1369,7 +1445,8 @@ The minimum additions required to `frontend/openapi.json`:
 
 **New component schemas required:**
 - `OrgRegisterResponse`: `{ org_id: string (uuid), access_token: string, token_type: "bearer" }`
-- `SupplierRegisterRequest` and `AgentRegisterRequest` or a unified `OrgRegisterRequest` — exact shape depends on how FastAPI serializes the discriminated union. The backend team must confirm this.
+- `SupplierRegisterRequest`: `{ name, jurisdiction, entity_type: "fund"|"corporate_treasury"|"foundation", contact_email, password (min 12) }`
+- `AgentRegisterRequest`: `{ name, jurisdiction, entity_type: "fund"|"corporate_treasury"|"foundation", contact_email, ops_contact_email, password (min 12), regulatory_status_attested: boolean }`
 
 ### §8.2 — Regenerating `src/api/types.gen.ts`
 
@@ -1383,33 +1460,37 @@ This executes `openapi-typescript ./openapi.json > src/api/types.gen.ts` (stdout
 
 ### §8.3 — Type usage in `useRegistrationForm`
 
-Once the types are regenerated, the `submitRegistration` hook should consume the typed path instead of `Record<string, unknown>`. The exact cast depends on the generated type shape:
+Once the types are regenerated, the `submitRegistration` hook can consume typed paths instead of `Record<string, unknown>`. The split endpoints produce clean, individually typed path entries with no union workaround:
 
 ```ts
 // After type generation — replace Record<string, unknown> with:
 import type { paths } from '@/api/types.gen';
 
-type RegisterBody = paths['/orgs/register']['post']['requestBody']['content']['application/json'];
-type RegisterResponse = paths['/orgs/register']['post']['responses']['201']['content']['application/json'];
+type SupplierBody =
+  paths['/orgs/register/supplier']['post']['requestBody']['content']['application/json'];
+type AgentBody =
+  paths['/orgs/register/agent']['post']['requestBody']['content']['application/json'];
+type RegisterResponse =
+  paths['/orgs/register/supplier']['post']['responses']['201']['content']['application/json'];
 ```
 
-This eliminates the `as never` cast in `submitRegistration` and makes the payload shape compile-time checked. Until the backend provides the updated `openapi.json`, the `Record<string, unknown>` approach in §3.2 is a valid interim.
+This eliminates the `as never` cast in `submitRegistration` and makes the payload shape compile-time checked. The interim `Record<string, unknown>` approach in §3.2 is valid until the backend provides the updated `openapi.json` and `generate-types` is re-run.
 
 ---
 
 ## §9 — Open Decisions
 
-The following items require resolution from the tech lead and/or backend team before implementation can be considered complete and final.
-
-| # | Decision | Blocker for? | Options / Recommendation |
+| # | Decision | Status | Notes |
 |---|---|---|---|
-| **D-1** | **`openapi.json` discriminated union shape.** FastAPI serializes a Pydantic `Annotated[Union[...], Discriminator("role")]` in a way that may not produce a straightforward JSON Schema `oneOf`. The exact shape in the generated OpenAPI spec must be confirmed by the backend team before `types.gen.ts` can be regenerated and the `as never` cast removed from `useRegistrationForm`. | `types.gen.ts` update (§8) | Backend team to provide a sample of `GET /openapi.json` from the running M1 backend. Frontend team to then update `openapi.json` and regenerate. |
-| **D-2** | **Agent `entity_type` UX.** The spec renders entity type as a disabled single-option `<select>` for agents. An alternative is to hide the field entirely and hardcode `entity_type: "agent"` silently. The disabled select is more transparent (user can see the value) but adds a visually confusing locked field. | UX only | Recommend confirming with product/design. If the preference is to hide it, remove the `<select>` and hardcode in the payload; no validation change required. |
-| **D-3** | **Backend open question §10.8: is `entity_type="agent"` valid for agent registration?** The M1-backend-techspec §10 flags that it is unclear whether `entity_type="agent"` should be the valid value for agent orgs or whether it is reserved. If the answer is "reserved" and the correct value for agent orgs is something else, the hardcoded `entity_type: "agent"` in `AgentRegisterPage` must change. | Agent registration correctness | Backend tech lead must resolve §10.8 in the backend spec before M1 frontend ships. |
-| **D-4** | **Redirect-if-authenticated on registration routes.** Currently, an already-logged-in user can visit `/register/supplier` or `/register/agent` without being redirected to `/dashboard`. This may be intentional (no such requirement in FEATURES.md) but could be surprising UX. | UX only | No action required for M1. Can add a redirect-if-authenticated check in a later polish pass. Flag if product disagrees. |
-| **D-5** | **Pydantic 422 body format inconsistency (backend).** The M1-backend-techspec §10 item 4 notes that Pydantic schema errors return `{ detail: [...] }` while domain errors return `{ error: { code, message } }`. The frontend `useRegistrationForm` hook handles both shapes (§3.2). However, if the backend standardizes the 422 format (likely to the `{ error: ... }` envelope per the backend spec recommendation), the `errBody?.detail?.[0]?.msg` fallback path can be removed. Recommend backend to resolve this before M1 ships so the frontend does not carry dead code. | Frontend cleanup | No blocking impact — the dual-format handler is safe for both outcomes. |
-| **D-6** | **Navigation after registration for already-authenticated users.** `useRegistrationForm` always navigates to `/dashboard` after success. If the product later adds a role-specific post-registration onboarding flow (e.g., supplier goes to `/onboarding/custodian`), this hook must be updated. Flag for M2. | M2+ | No action in M1. |
+| **D-1** | **Split endpoints vs discriminated union** | **RESOLVED** | Backend rev 2 ships `POST /orgs/register/supplier` and `POST /orgs/register/agent` as separate endpoints. No union workaround needed. Frontend updated throughout. |
+| **D-2** | **Agent `entity_type` UX** | Open | Rev 1 rendered a disabled single-option `<select>` with `"agent"`. Rev 2 revises this: agent orgs now select from Fund / Corporate Treasury / Foundation (same dropdown as suppliers), per backend Decision 8. The UX decision about which of the three to default, if any, is open — no default is set; the user must select. Flag for product/design to confirm. |
+| **D-3** | **`entity_type="agent"` validity for agent registration** | **RESOLVED** | Backend Decision 8: `"agent"` is excluded from the public `EntityType` schema. Agent orgs register with one of `"fund"`, `"corporate_treasury"`, `"foundation"`. The `"agent"` DB ENUM value is reserved for future internal/admin use. |
+| **D-4** | **Redirect-if-authenticated on registration routes** | Open (non-blocking) | No redirect-if-authenticated guard in M1. Can add in a later polish pass. Flag if product disagrees. |
+| **D-5** | **Pydantic 422 body format inconsistency** | **RESOLVED** | Backend rev 2 §7.6 adds a global `RequestValidationError` handler that standardizes all 422 responses to `{"error": {"code": "...", "message": "..."}}`. The `detail` array fallback path has been removed from `useRegistrationForm`. |
+| **D-6** | **Navigation after registration for already-authenticated users** | Open (non-blocking) | `useRegistrationForm` always navigates to `/dashboard`. If M2+ adds role-specific onboarding flows, the hook must be updated. No action in M1. |
+
+**Remaining open items for tech lead:** D-2 (entity type default selection UX on agent form) and D-4 / D-6 (non-blocking UX polish). No decisions block M1 implementation.
 
 ---
 
-Status: Draft — awaiting tech-lead and backend cross-review
+Status: Draft rev 2 — awaiting final tech-lead cross-review
