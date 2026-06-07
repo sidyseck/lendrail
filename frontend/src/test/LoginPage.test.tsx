@@ -61,7 +61,8 @@ describe('LoginPage', () => {
     await user.type(screen.getByLabelText(/password/i), 'wrongpassword');
     await user.click(screen.getByRole('button', { name: /sign in/i }));
 
-    // MSW returns { error: { code: 'invalid_credentials', message: 'Email or password is incorrect' } }
+    // MSW mirrors the real backend: { error: { code: 'unauthorized', message: 'invalid_credentials' } }.
+    // LoginPage maps that to friendly copy via friendlyAuthError().
     await waitFor(() => {
       expect(
         screen.getByText(/email or password is incorrect/i),

@@ -39,8 +39,9 @@ export const authHandlers = [
       );
     }
 
-    // FIX 5: wrong credentials — MUST use the backend error envelope via mockError().
-    // Code matches the backend's AuthError("invalid_credentials").
-    return mockError('invalid_credentials', 'Email or password is incorrect', 401);
+    // FIX 5: wrong credentials — MUST mirror the backend response exactly.
+    // The real API returns { error: { code: "unauthorized", message: "invalid_credentials" } }
+    // (verified against backend/app/core/errors.py + auth_service AuthError).
+    return mockError('unauthorized', 'invalid_credentials', 401);
   }),
 ];

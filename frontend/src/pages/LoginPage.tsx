@@ -6,6 +6,16 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
+// Maps the backend's error envelope to user-facing copy. The API returns
+// terse codes/messages (e.g. code "unauthorized", message "invalid_credentials");
+// we surface friendly text rather than the raw wire value.
+function friendlyAuthError(code?: string, message?: string): string {
+  if (code === 'unauthorized' || message === 'invalid_credentials') {
+    return 'Email or password is incorrect';
+  }
+  return message ?? 'Sign in failed. Please try again.';
+}
+
 export function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
@@ -32,10 +42,10 @@ export function LoginPage() {
 
       if (!response.ok || apiError || !data) {
         // Read from the backend error envelope: { error: { code, message } }
-        const message =
-          (apiError as { error?: { message?: string } } | undefined)?.error
-            ?.message ?? 'Sign in failed. Please try again.';
-        setError(message);
+        const envelope = (apiError as
+          | { error?: { code?: string; message?: string } }
+          | undefined)?.error;
+        setError(friendlyAuthError(envelope?.code, envelope?.message));
         return;
       }
 
