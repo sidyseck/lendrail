@@ -7,7 +7,7 @@
 | Based on | MASTER_PRD.md v0.1, ARCHITECTURE.md v0.2, FEATURES.md, M0-backend-techspec.md, M1-backend-techspec.md |
 | Audience | Backend engineer implementing M2, extending the M1 codebase |
 | M1 spec ref | `specs/M1-backend-techspec.md` |
-| Status | Draft — awaiting tech-lead review |
+| Status | Implementation-ready spec (rev 2 — tech-lead blockers/majors applied) |
 
 ---
 
@@ -18,7 +18,7 @@ M2 delivers the supplier-agent connection feature. A Supplier sends a connection
 Non-negotiable conventions (identical to M0/M1 — repeated for reference):
 
 - **Layer boundaries.** `API (routers) → domain services → data (repositories) + adapters`. Domain services **never** import FastAPI types (`Depends`, `HTTPException`, `Request`, status codes). They take `AuthUser` and typed inputs; they raise typed domain exceptions from `app/core/errors.py`.
-- **Error envelope.** All error responses: `{"error": {"code": "...", "message": "..."}}`. All 422 responses use this envelope via the global `RequestValidationError` handler already registered in M0/M1.
+- **Error envelope.** All error responses: `{"error": {"code": "...", "message": "..."}}`. All 422 responses use this envelope via the global `RequestValidationError` handler already registered in M0/M1. **This handler also wraps Pydantic `model_validator` `ValueError`s** into the same envelope — confirmed in M1 baseline (see §7.1 note).
 - **Secrets.** Plaintext custodian API keys are never logged, never returned in API responses, and never stored in any DB column. Only the opaque `ref` from `SecretStore.store()` is persisted in `custodian_links.encrypted_api_key_ref`.
 - **PyJWT only.** `python-jose` is not used anywhere.
 - **Async all the way.** SQLAlchemy 2.x async sessions; all adapter Protocols remain `async def`.
@@ -311,11 +311,17 @@ def downgrade() -> None:
 
 """connections table (F-021)
 
-One row per supplier-agent pair. UNIQUE constraint on (supplier_id, agent_id)
-prevents duplicate connections between the same two orgs.
+One row per supplier-agent pair.
+
+The uniqueness constraint is implemented as a PARTIAL UNIQUE INDEX scoped to
+non-terminated connections. This allows terminated pairs to re-invite, creating
+a new connection row. See §10 item 9 for the re-connect policy.
 
 custodian_link_id is nullable until the supplier registers the API key (F-024).
 Once a valid key is registered, custodian_link_id is set and status → active.
+
+Status machine: pending → accepted → active → suspended / terminated
+                                             ↑ (re-key allowed from suspended)
 
 Revision ID: 0008
 Revises: 0007
@@ -331,7 +337,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 connection_status_enum = sa.Enum(
-    "pending", "active", "suspended", "terminated",
+    "pending", "accepted", "active", "suspended", "terminated",
     name="connection_status_enum",
     create_type=True,
 )
@@ -355,7 +361,7 @@ def upgrade() -> None:
         ),
         sa.Column(
             "status",
-            sa.Enum("pending", "active", "suspended", "terminated",
+            sa.Enum("pending", "accepted", "active", "suspended", "terminated",
                     name="connection_status_enum", create_type=False),
             nullable=False,
             server_default="pending",
@@ -376,16 +382,22 @@ def upgrade() -> None:
         ),
         sa.Column("activated_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name="pk_connections"),
-        # Hard constraint: only one connection per supplier-agent pair.
-        sa.UniqueConstraint(
-            "supplier_id", "agent_id",
-            name="uq_connections_supplier_id_agent_id",
-        ),
+        # NOTE: no UniqueConstraint here — uniqueness is enforced via partial index below.
     )
     op.create_index("ix_connections_supplier_id", "connections", ["supplier_id"])
     op.create_index("ix_connections_agent_id", "connections", ["agent_id"])
+    # Partial unique index: only one non-terminated connection per supplier-agent pair.
+    # Terminated pairs CAN re-invite (a new row is created). See §10 item 9.
+    op.create_index(
+        "uq_connections_supplier_agent_active",
+        "connections",
+        ["supplier_id", "agent_id"],
+        unique=True,
+        postgresql_where=sa.text("status != 'terminated'"),
+    )
 
 def downgrade() -> None:
+    op.drop_index("uq_connections_supplier_agent_active", table_name="connections")
     op.drop_index("ix_connections_agent_id", table_name="connections")
     op.drop_index("ix_connections_supplier_id", table_name="connections")
     op.drop_table("connections")
@@ -399,12 +411,25 @@ def downgrade() -> None:
 | `id` | `UUID` | PK NOT NULL | `uuid.uuid4()` default in ORM |
 | `supplier_id` | `UUID` | NOT NULL FK → `organizations.id` ON DELETE RESTRICT | Must reference a supplier org |
 | `agent_id` | `UUID` | NOT NULL FK → `organizations.id` ON DELETE RESTRICT | Must reference an agent org |
-| `status` | `connection_status_enum` | NOT NULL DEFAULT `pending` | DB-level ENUM: `pending`, `active`, `suspended`, `terminated` |
+| `status` | `connection_status_enum` | NOT NULL DEFAULT `pending` | DB-level ENUM: `pending`, `accepted`, `active`, `suspended`, `terminated` |
 | `custodian_link_id` | `UUID` | NULLABLE FK → `custodian_links.id` ON DELETE SET NULL | Null until F-024 key registration |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | |
 | `activated_at` | `TIMESTAMPTZ` | NULLABLE | Set when `status → active` (after F-024 key validation) |
 
-**UNIQUE constraint:** `uq_connections_supplier_id_agent_id` on `(supplier_id, agent_id)`. Enforces exactly one connection row per supplier-agent pair. Attempting to invite the same agent twice raises a DB UNIQUE violation, which is caught in the service layer and surfaced as `ConflictError(code="connection_already_exists")`.
+**Uniqueness constraint:** Implemented as partial unique index `uq_connections_supplier_agent_active` on `(supplier_id, agent_id) WHERE status != 'terminated'`. This enforces at most one active/accepted/pending connection per supplier-agent pair, while allowing a new connection row to be created after a prior one is terminated. Attempting to invite an already-connected (non-terminated) agent raises a DB unique violation, caught in the service layer and surfaced as `ConflictError(code="connection_already_exists")`.
+
+**Connection state machine:**
+
+```
+[invite]         [accept]          [register key]
+  pending  ──►  accepted  ──────►  active  ──► suspended
+                                     ▲              │
+                                     └──────────────┘ (re-key from suspended)
+  pending  ──► terminated   (any non-terminated status can be terminated)
+  accepted ──► terminated
+  active   ──► terminated
+  suspended──► terminated
+```
 
 ### 3.4 SecretStore decision for M2 — process-local is acceptable for MVP
 
@@ -510,7 +535,7 @@ class Connection(Base):
         index=True,
     )
     status: Mapped[str] = mapped_column(
-        sa.Enum("pending", "active", "suspended", "terminated",
+        sa.Enum("pending", "accepted", "active", "suspended", "terminated",
                 name="connection_status_enum", create_type=False),
         nullable=False,
         server_default="pending",
@@ -530,12 +555,9 @@ class Connection(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    __table_args__ = (
-        sa.UniqueConstraint(
-            "supplier_id", "agent_id",
-            name="uq_connections_supplier_id_agent_id",
-        ),
-    )
+    # Uniqueness is enforced by the partial index uq_connections_supplier_agent_active
+    # (WHERE status != 'terminated') defined in migration 0008.
+    # No __table_args__ UniqueConstraint — the partial index is DDL-only.
 ```
 
 ### 4.3 `app/models/__init__.py` update
@@ -587,13 +609,19 @@ from app.models.connection import Connection
 class ConnectionRepository(BaseRepository[Connection]):
     model = Connection
 
-    async def get_by_supplier_and_agent(
+    async def get_by_supplier_and_agent_non_terminated(
         self, supplier_id: UUID, agent_id: UUID
     ) -> Connection | None:
-        """Return the existing connection between a supplier and agent, or None."""
+        """Return the existing non-terminated connection between a supplier and agent, or None.
+
+        Terminated connections are excluded — a supplier may re-invite an agent
+        after their prior connection was terminated (new row is created).
+        See §10 item 9 for the re-connect policy.
+        """
         rows = await self.list_where(
             Connection.supplier_id == supplier_id,
             Connection.agent_id == agent_id,
+            Connection.status != "terminated",
         )
         return rows[0] if rows else None
 
@@ -614,16 +642,16 @@ class ConnectionRepository(BaseRepository[Connection]):
         result = await self.session.execute(select(Connection))
         return list(result.scalars().all())
 
-    async def list_active_by_connection(self, connection_id: UUID) -> list:
+    async def list_active_loans_by_connection(self, connection_id: UUID) -> list[UUID]:
         """Stub: return active loans for a connection.
 
         The loans table does not exist in M2. This method returns an empty list
-        as a deliberate no-op stub. M3/M4 will replace this with a real query
+        as a deliberate no-op stub. M4 will replace this with a real query
         against the loans table once it exists (F-033).
 
         See §10 (Open decisions, item 3) for the design decision.
         """
-        return []
+        return []  # M4 gate: wire real loan query
 ```
 
 ---
@@ -640,6 +668,7 @@ class ConnectionRepository(BaseRepository[Connection]):
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 
 # ── Input DTOs ────────────────────────────────────────────────────────────────
@@ -647,7 +676,8 @@ from datetime import datetime
 @dataclass
 class InviteConnectionInput:
     # Supplier provides either agent_org_id (known agent) or agent_email (unknown agent).
-    # Exactly one must be set — enforced in service.invite().
+    # Exactly one must be set — enforced via Pydantic model_validator on
+    # InviteConnectionRequest (see §7.1). The service re-checks for belt-and-suspenders.
     agent_org_id: uuid.UUID | None
     agent_email: str | None
 
@@ -680,7 +710,7 @@ class ConnectionListResult:
 @dataclass
 class TerminateResult:
     connection_id: uuid.UUID
-    status: str
+    status: Literal["terminated"]
     flagged_loan_ids: list[uuid.UUID] = field(default_factory=list)
 ```
 
@@ -740,7 +770,8 @@ class ConnectionService:
         if caller.org_id is None:
             raise Forbidden("Caller has no associated organization")
 
-        # Must provide exactly one of agent_org_id or agent_email.
+        # Belt-and-suspenders guard (primary enforcement is in InviteConnectionRequest
+        # model_validator — see §7.1).
         if data.agent_org_id is None and not data.agent_email:
             raise ValidationError(
                 "Provide either agent_org_id or agent_email",
@@ -789,8 +820,9 @@ class ConnectionService:
                 )
             known_agent = True
 
-        # Check for duplicate connection.
-        existing = await self.connections.get_by_supplier_and_agent(
+        # Check for duplicate non-terminated connection.
+        # Terminated pairs CAN re-invite — a new row is created. See §10 item 9.
+        existing = await self.connections.get_by_supplier_and_agent_non_terminated(
             supplier_id=caller.org_id, agent_id=agent_org.id
         )
         if existing is not None:
@@ -822,9 +854,13 @@ class ConnectionService:
     async def accept(self, caller: AuthUser, connection_id: uuid.UUID) -> ConnectionResult:
         """Agent accepts a pending connection invitation.
 
+        Transitions: pending → accepted.
+        The connection moves to 'active' only after the supplier registers
+        the custodian API key (F-024).
+
         Role check: caller must be agent.
         Ownership check: connection.agent_id must match caller.org_id.
-        State check: connection must be in pending status.
+        State check: connection must be in 'pending' status.
         """
         if caller.role != "agent":
             raise Forbidden("Only agents can accept connection invitations")
@@ -842,8 +878,8 @@ class ConnectionService:
                 code="invalid_connection_status",
             )
 
-        connection = await self.connections.update(connection, status="pending")
-        # Status stays pending — it becomes active only after key registration (F-024).
+        # Transition: pending → accepted.
+        connection = await self.connections.update(connection, status="accepted")
         log.info(
             "connection_accepted connection_id=%s agent_id=%s",
             connection_id, caller.org_id,
@@ -866,6 +902,8 @@ class ConnectionService:
     ) -> ConnectionResult:
         """Supplier registers a custodian API key for a connection.
 
+        Transitions: accepted → active (or suspended → active on re-key).
+
         Security contract:
         - data.plaintext_key is passed to SecretStore.store() immediately.
         - It is NEVER assigned to any variable that is logged.
@@ -875,7 +913,7 @@ class ConnectionService:
 
         Role check: caller must be supplier.
         Ownership check: connection.supplier_id must match caller.org_id.
-        State check: connection must be pending (not yet active, not terminated).
+        State check: connection must be accepted or suspended.
         """
         if caller.role != "supplier":
             raise Forbidden("Only suppliers can register custodian API keys")
@@ -887,7 +925,7 @@ class ConnectionService:
         if connection.supplier_id != caller.org_id:
             raise Forbidden("This connection does not belong to your organization")
 
-        if connection.status not in ("pending", "suspended"):
+        if connection.status not in ("accepted", "suspended"):
             raise ConflictError(
                 f"Connection is in '{connection.status}' status; cannot register a key",
                 code="invalid_connection_status",
@@ -965,7 +1003,7 @@ class ConnectionService:
 
         Role check: caller must be supplier or agent.
         Ownership check: caller's org must be either supplier_id or agent_id.
-        State check: connection must be active (cannot suspend pending or terminated).
+        State check: connection must be active (cannot suspend pending, accepted, or terminated).
         """
         connection = await self._get_and_assert_membership(caller, connection_id)
 
@@ -1013,7 +1051,7 @@ class ConnectionService:
 
         # Stub: flag active loans. Returns [] in M2 (loans table does not exist yet).
         # M4 will replace this with: loans = await loan_repo.list_active_by_connection(connection_id)
-        flagged_loan_ids = await self.connections.list_active_by_connection(connection_id)
+        flagged_loan_ids: list[uuid.UUID] = await self.connections.list_active_loans_by_connection(connection_id)
 
         connection = await self.connections.update(connection, status="terminated")
         log.info(
@@ -1108,12 +1146,14 @@ def _to_result(c) -> ConnectionResult:
         activated_at=c.activated_at.isoformat() if c.activated_at else None,
     )
 
+_NIL_UUID = uuid.UUID(int=0)  # Sentinel — never a real connection ID.
+
 def _sentinel_result(supplier_org_id: uuid.UUID) -> ConnectionResult:
     """Returned when invite is sent to an unregistered email. Router maps to HTTP 202."""
     return ConnectionResult(
-        id=uuid.UUID(int=0),
+        id=_NIL_UUID,
         supplier_id=supplier_org_id,
-        agent_id=uuid.UUID(int=0),
+        agent_id=_NIL_UUID,
         status="pending",
         custodian_link_id=None,
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -1127,22 +1167,40 @@ def _sentinel_result(supplier_org_id: uuid.UUID) -> ConnectionResult:
 
 ### 7.1 Pydantic request/response schemas (`app/schemas/connections.py`)
 
+**Note on `model_validator` error envelope:** The global `RequestValidationError` handler registered in M1 wraps Pydantic `model_validator` `ValueError`s into the standard `{"error": {"code": "validation_error", "message": "..."}}` envelope. Therefore the mutual-exclusion guard on `InviteConnectionRequest` is placed in a `model_validator` — it will produce the correct 422 error envelope automatically.
+
 ```python
 # app/schemas/connections.py
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 
 # ── Request models ────────────────────────────────────────────────────────────
 
 class InviteConnectionRequest(BaseModel):
     # Exactly one of agent_org_id or agent_email must be provided.
-    # Mutual-exclusion is enforced in the service (not a model_validator)
-    # to ensure the error envelope is always {"error": {"code": "..."}}.
+    # The model_validator below enforces mutual exclusion at the Pydantic layer.
+    # The global RequestValidationError handler wraps model_validator ValueError
+    # into {"error": {"code": "validation_error", "message": "..."}} — same envelope
+    # as all other 422 responses. See §0 error envelope note.
     agent_org_id: UUID | None = None
     agent_email: EmailStr | None = None
+
+    @model_validator(mode="after")
+    def check_exactly_one_agent_identifier(self) -> "InviteConnectionRequest":
+        has_org_id = self.agent_org_id is not None
+        has_email = self.agent_email is not None
+        if not has_org_id and not has_email:
+            raise ValueError(
+                "Provide either agent_org_id or agent_email"
+            )
+        if has_org_id and has_email:
+            raise ValueError(
+                "Provide only one of agent_org_id or agent_email"
+            )
+        return self
 
 
 class RegisterCustodianKeyRequest(BaseModel):
@@ -1177,7 +1235,7 @@ class InviteUnknownAgentResponse(BaseModel):
 class TerminateResponse(BaseModel):
     connection_id: UUID
     status: Literal["terminated"]
-    flagged_loan_ids: list[UUID]
+    flagged_loan_ids: list[str]      # UUIDs serialized as strings for JSON transport
     message: str = (
         "Connection terminated. "
         "You must rotate the custodian API key at the custodian to revoke agent access."
@@ -1283,8 +1341,8 @@ async def invite(
     Error responses:
     - 403: caller is not a supplier
     - 409: connection between these two orgs already exists → code="connection_already_exists"
-    - 422: neither agent_org_id nor agent_email provided → code="missing_agent_identifier"
-    - 422: both agent_org_id and agent_email provided → code="ambiguous_agent_identifier"
+    - 422: neither agent_org_id nor agent_email provided → code="validation_error"
+    - 422: both agent_org_id and agent_email provided → code="validation_error"
     - 422: org is not an agent role → code="not_an_agent"
     - 404: agent_org_id does not exist → code="agent_not_found"
     """
@@ -1322,6 +1380,10 @@ async def accept(
     """
     Requires agent JWT. Agent must be the named agent on the connection.
 
+    Transitions status: pending → accepted.
+    The connection reaches 'active' only after the supplier registers the
+    custodian API key (F-024).
+
     Error responses:
     - 403: caller is not an agent
     - 403: caller's org is not the agent on this connection → code="forbidden"
@@ -1353,7 +1415,7 @@ async def register_custodian_key(
     It is NEVER returned in the response body. It is NEVER written to any log line.
 
     On validation failure: the stored secret is deleted and HTTP 422 is returned.
-    The connection remains in 'pending' status.
+    The connection remains in 'accepted' status.
 
     On validation success: a CustodianLink row is created (storing only the SecretStore ref),
     the link is attached to the connection, and status transitions to 'active'.
@@ -1362,7 +1424,7 @@ async def register_custodian_key(
     - 403: caller is not a supplier
     - 403: caller's org is not the supplier on this connection → code="forbidden"
     - 404: connection_id not found → code="not_found"
-    - 409: connection is not in pending or suspended status → code="invalid_connection_status"
+    - 409: connection is not in accepted or suspended status → code="invalid_connection_status"
     - 422: custodian key rejected by adapter → code="custodian_key_invalid"
     """
     result = await svc.register_custodian_key(
@@ -1435,7 +1497,7 @@ async def terminate(
     return TerminateResponse(
         connection_id=result.connection_id,
         status="terminated",
-        flagged_loan_ids=result.flagged_loan_ids,
+        flagged_loan_ids=[str(lid) for lid in result.flagged_loan_ids],
     )
 
 
@@ -1533,16 +1595,16 @@ app.include_router(connections.router)
 
 ### 7.6 Error envelope reference for M2 endpoints
 
-All domain errors are mapped by the existing handler in `app/core/errors.py`. All 422 responses use the `{"error": {"code": "...", "message": "..."}}` envelope.
+All domain errors are mapped by the existing handler in `app/core/errors.py`. All 422 responses use the `{"error": {"code": "...", "message": "..."}}` envelope. Pydantic `model_validator` `ValueError`s are also wrapped by the global `RequestValidationError` handler into this same envelope with `code="validation_error"`.
 
 | Scenario | Exception | HTTP | Code |
 |---|---|---|---|
 | Non-supplier calls `POST /connections/invite` | `Forbidden` via `require_role("supplier")` | 403 | `forbidden` |
-| No `agent_org_id` or `agent_email` | `ValidationError` | 422 | `missing_agent_identifier` |
-| Both `agent_org_id` and `agent_email` provided | `ValidationError` | 422 | `ambiguous_agent_identifier` |
+| No `agent_org_id` or `agent_email` | Pydantic `model_validator` ValueError | 422 | `validation_error` |
+| Both `agent_org_id` and `agent_email` provided | Pydantic `model_validator` ValueError | 422 | `validation_error` |
 | `agent_org_id` points to a non-agent org | `ValidationError` | 422 | `not_an_agent` |
 | `agent_org_id` not found | `NotFoundError` | 404 | `agent_not_found` |
-| Duplicate connection | `ConflictError` | 409 | `connection_already_exists` |
+| Duplicate connection (non-terminated) | `ConflictError` | 409 | `connection_already_exists` |
 | Non-agent calls `POST /connections/{id}/accept` | `Forbidden` via `require_role("agent")` | 403 | `forbidden` |
 | Agent does not own the connection | `Forbidden` | 403 | `forbidden` |
 | Connection not in `pending` state (on accept) | `ConflictError` | 409 | `invalid_connection_status` |
@@ -1550,7 +1612,7 @@ All domain errors are mapped by the existing handler in `app/core/errors.py`. Al
 | Supplier does not own the connection | `Forbidden` | 403 | `forbidden` |
 | `validate_key()` returns `False` | `ValidationError` | 422 | `custodian_key_invalid` |
 | `validate_key()` raises exception | `ValidationError` | 422 | `custodian_key_invalid` |
-| Connection not in `pending`/`suspended` (on key reg) | `ConflictError` | 409 | `invalid_connection_status` |
+| Connection not in `accepted`/`suspended` (on key reg) | `ConflictError` | 409 | `invalid_connection_status` |
 | Org not a party to connection (on suspend/terminate) | `Forbidden` | 403 | `forbidden` |
 | Suspend non-active connection | `ConflictError` | 409 | `invalid_connection_status` |
 | Terminate already-terminated connection | `ConflictError` | 409 | `connection_already_terminated` |
@@ -1630,6 +1692,10 @@ async def pending_connection_id(client, supplier_headers, agent_org_id) -> uuid.
     """Create a pending connection (supplier invites agent by org_id). Returns connection_id."""
 
 @pytest.fixture
+async def accepted_connection_id(client, pending_connection_id, agent_headers) -> uuid.UUID:
+    """Accept the pending connection (agent accepts). Returns connection_id with status=accepted."""
+
+@pytest.fixture
 def mock_adapter_valid() -> MockCustodianAdapter:
     return MockCustodianAdapter(validate_key_result=True)
 
@@ -1639,6 +1705,14 @@ def mock_adapter_invalid() -> MockCustodianAdapter:
 ```
 
 Tests in `mock_adapter_invalid` scenarios override `get_custodian_adapter` via `app.dependency_overrides`.
+
+### M2 gate — null org_id guard (conftest-level)
+
+| Test | Description | Asserts |
+|---|---|---|
+| `test_no_null_org_id_users_after_m1_fixtures` | Runs after all M1 conftest fixtures are applied, before migration 0005 | `SELECT count(*) FROM users WHERE org_id IS NULL` returns 0; guards against any future M1 fixture change introducing a null-org user |
+
+**Note:** This test must be ordered to execute before `test_0005_migration_not_null_applies` in the test suite. Implement as a conftest-level `autouse` session fixture assertion or as the first test in the migration test file.
 
 ### F-020 — `custodian_links` migration
 
@@ -1655,10 +1729,12 @@ Tests in `mock_adapter_invalid` scenarios override `get_custodian_adapter` via `
 
 | Test | Description | Asserts |
 |---|---|---|
-| `test_0008_migration_applies` | `alembic upgrade head` through 0008 | `connections` table exists; `connection_status_enum` type exists; UNIQUE constraint `uq_connections_supplier_id_agent_id` exists |
-| `test_0008_downgrade` | `downgrade -1` | `connections` table dropped; enum dropped |
+| `test_0008_migration_applies` | `alembic upgrade head` through 0008 | `connections` table exists; `connection_status_enum` type exists (values: pending, accepted, active, suspended, terminated); partial index `uq_connections_supplier_agent_active` exists |
+| `test_0008_downgrade` | `downgrade -1` | `connections` table dropped; enum dropped; index dropped |
 | `test_connection_status_enum_constraint` | Insert row with `status="invalid"` | DB raises `DataError` |
-| `test_connection_unique_supplier_agent` | Insert two rows with same `(supplier_id, agent_id)` | DB raises `IntegrityError` on `uq_connections_supplier_id_agent_id` |
+| `test_connection_status_enum_accepted_valid` | Insert row with `status="accepted"` | Succeeds |
+| `test_connection_unique_supplier_agent_non_terminated` | Insert two non-terminated rows with same `(supplier_id, agent_id)` | DB raises `IntegrityError` on `uq_connections_supplier_agent_active` |
+| `test_connection_reinvite_after_termination` | Insert terminated row, then insert new pending row with same `(supplier_id, agent_id)` | Second insert succeeds — partial index allows it |
 | `test_connection_supplier_id_fk_enforced` | Insert with non-existent `supplier_id` | DB raises `IntegrityError` |
 | `test_connection_agent_id_fk_enforced` | Insert with non-existent `agent_id` | DB raises `IntegrityError` |
 | `test_connection_custodian_link_id_nullable` | Insert without `custodian_link_id` | Succeeds; `custodian_link_id` is `NULL` |
@@ -1681,11 +1757,12 @@ Tests in `mock_adapter_invalid` scenarios override `get_custodian_adapter` via `
 | `test_invite_by_org_id_201` | Supplier JWT + valid `agent_org_id` | HTTP 201; body has `connection_id`, `status="pending"`, `custodian_link_present=false` |
 | `test_invite_creates_pending_connection_in_db` | Same; query DB | `connections` row with `status="pending"`, correct `supplier_id` and `agent_id` |
 | `test_invite_with_agent_jwt_403` | Agent JWT on `POST /connections/invite` | HTTP 403; `code="forbidden"` |
-| `test_invite_missing_both_fields_422` | Neither `agent_org_id` nor `agent_email` | HTTP 422; `code="missing_agent_identifier"` |
-| `test_invite_both_fields_422` | Both `agent_org_id` and `agent_email` | HTTP 422; `code="ambiguous_agent_identifier"` |
+| `test_invite_missing_both_fields_422` | Neither `agent_org_id` nor `agent_email` | HTTP 422; `code="validation_error"` (global handler wraps model_validator ValueError) |
+| `test_invite_both_fields_422` | Both `agent_org_id` and `agent_email` | HTTP 422; `code="validation_error"` |
 | `test_invite_nonexistent_agent_org_id_404` | `agent_org_id` that doesn't exist | HTTP 404; `code="agent_not_found"` |
 | `test_invite_supplier_org_as_agent_422` | `agent_org_id` points to a supplier org | HTTP 422; `code="not_an_agent"` |
-| `test_invite_duplicate_409` | Same supplier+agent pair invited twice | HTTP 409; `code="connection_already_exists"` |
+| `test_invite_duplicate_409` | Same supplier+agent pair invited twice (non-terminated) | HTTP 409; `code="connection_already_exists"` |
+| `test_invite_after_termination_201` | Same supplier+agent pair re-invites after prior connection terminated | HTTP 201; new `connection_id`; `status="pending"` |
 | `test_invite_unknown_email_202` | `agent_email` not registered | HTTP 202; response has `agent_email`; `connection_invite_to_unknown` event logged (caplog) |
 | `test_invite_known_email_201` | `agent_email` matches a registered agent org | HTTP 201; `status="pending"` |
 | `test_invite_no_token_401` | No `Authorization` header | HTTP 401 |
@@ -1694,11 +1771,12 @@ Tests in `mock_adapter_invalid` scenarios override `get_custodian_adapter` via `
 
 | Test | Description | Asserts |
 |---|---|---|
-| `test_accept_200` | Agent JWT + pending connection | HTTP 200; body `status="pending"` (awaiting key); `connection_accepted` event logged |
-| `test_accept_updates_db_status` | Same; query DB | `connections.status` unchanged from `pending` (accept alone does not activate) |
+| `test_accept_200` | Agent JWT + pending connection | HTTP 200; body `status="accepted"`; `connection_accepted` event logged |
+| `test_accept_updates_db_status` | Same; query DB | `connections.status = "accepted"` (pending → accepted transition confirmed) |
 | `test_accept_with_supplier_jwt_403` | Supplier JWT | HTTP 403; `code="forbidden"` |
 | `test_accept_wrong_agent_org_403` | Agent JWT with different `org_id` than connection's `agent_id` | HTTP 403; `code="forbidden"` |
 | `test_accept_nonexistent_connection_404` | Random UUID | HTTP 404; `code="not_found"` |
+| `test_accept_already_accepted_409` | Connection with `status="accepted"` | HTTP 409; `code="invalid_connection_status"` |
 | `test_accept_already_active_409` | Connection with `status="active"` | HTTP 409; `code="invalid_connection_status"` |
 | `test_accept_terminated_409` | Connection with `status="terminated"` | HTTP 409; `code="invalid_connection_status"` |
 
@@ -1706,16 +1784,17 @@ Tests in `mock_adapter_invalid` scenarios override `get_custodian_adapter` via `
 
 | Test | Description | Asserts |
 |---|---|---|
-| `test_register_key_200_mock_valid` | Supplier JWT; mock adapter returns `validate_key=True` | HTTP 200; `status="active"`; `custodian_link_present=true`; `activated_at` non-null |
+| `test_register_key_200_mock_valid` | Supplier JWT; accepted connection; mock adapter returns `validate_key=True` | HTTP 200; `status="active"`; `custodian_link_present=true`; `activated_at` non-null |
 | `test_register_key_no_plaintext_in_response` | Same; inspect full response body | `"plaintext_key"` absent; no key material in any field |
 | `test_register_key_no_plaintext_in_logs` | Same; capture logs (caplog) | No log record contains the submitted key value |
 | `test_custodian_link_row_created` | Same; query `custodian_links` table | Row exists; `encrypted_api_key_ref` is a UUID string (not the key); `status="active"` |
 | `test_encrypted_api_key_ref_is_ref_not_key` | Same; inspect `custodian_links.encrypted_api_key_ref` | Value is a UUID-format string; is NOT equal to the submitted plaintext key |
-| `test_register_key_422_mock_invalid` | Mock adapter seeded with `validate_key_result=False` | HTTP 422; `code="custodian_key_invalid"`; connection remains `pending` |
+| `test_register_key_422_mock_invalid` | Mock adapter seeded with `validate_key_result=False` | HTTP 422; `code="custodian_key_invalid"`; connection remains `accepted` |
 | `test_register_key_422_secret_deleted_on_failure` | Mock adapter returns `False`; inspect SecretStore | The ref from the failed attempt is no longer in the SecretStore (no orphaned ciphertext) |
 | `test_register_key_with_agent_jwt_403` | Agent JWT | HTTP 403; `code="forbidden"` |
 | `test_register_key_wrong_supplier_403` | Different supplier org's JWT | HTTP 403; `code="forbidden"` |
 | `test_register_key_nonexistent_connection_404` | Random UUID | HTTP 404; `code="not_found"` |
+| `test_register_key_on_pending_connection_409` | Connection in `pending` status (not yet accepted) | HTTP 409; `code="invalid_connection_status"` |
 | `test_register_key_on_terminated_connection_409` | Connection in `terminated` status | HTTP 409; `code="invalid_connection_status"` |
 
 ### F-025 — `POST /connections/{id}/suspend` and `POST /connections/{id}/terminate`
@@ -1761,11 +1840,12 @@ async def test_full_connection_flow(client, supplier_headers, agent_headers):
     """
     Full supplier-agent connection lifecycle:
     1. Supplier invites agent → pending (F-022)
-    2. Agent accepts → still pending (F-023)
+    2. Agent accepts → accepted (F-023)
     3. Supplier registers key → active (F-024)
     4. Both parties can read connection (F-026)
     5. Supplier terminates → terminated (F-025)
     6. GET returns terminated state (F-026)
+    7. Supplier re-invites same agent → new pending connection (re-connect after termination)
     """
     # 1. Invite
     invite_resp = await client.post(
@@ -1783,7 +1863,7 @@ async def test_full_connection_flow(client, supplier_headers, agent_headers):
         headers=agent_headers,
     )
     assert accept_resp.status_code == 200
-    assert accept_resp.json()["status"] == "pending"
+    assert accept_resp.json()["status"] == "accepted"
 
     # 3. Register key (mock adapter: valid)
     key_resp = await client.post(
@@ -1818,6 +1898,17 @@ async def test_full_connection_flow(client, supplier_headers, agent_headers):
     final = await client.get(f"/connections/{conn_id}", headers=supplier_headers)
     assert final.json()["status"] == "terminated"
 
+    # 7. Re-invite same agent after termination (partial index allows this)
+    reinvite_resp = await client.post(
+        "/connections/invite",
+        json={"agent_org_id": str(agent_org_id)},
+        headers=supplier_headers,
+    )
+    assert reinvite_resp.status_code == 201
+    new_conn_id = reinvite_resp.json()["connection_id"]
+    assert new_conn_id != conn_id
+    assert reinvite_resp.json()["status"] == "pending"
+
 
 async def test_m2_gate_pre_m1_token_rejected(client):
     """Tokens without org_id (pre-M1 format) are rejected with 401."""
@@ -1843,14 +1934,28 @@ async def test_m2_gate_pre_m1_token_rejected(client):
 
 2. **`AuthUser.org_id` non-nullable.** Implemented in §7.2. Pre-M1 tokens with `org_id=null` now receive HTTP 401 with `code="token_missing_org_id"`. This is a breaking change for any M0/M1 seed users whose JWTs were issued before the M1 registration flow. Operationally, affected users must re-login to get a fresh JWT.
 
-3. **Loan flagging on termination (F-025 stub).** The `loans` table does not exist in M2. `ConnectionRepository.list_active_by_connection()` returns `[]` as a deliberate no-op stub. M4 (F-033) adds the `loans` table. M4 must replace this stub with a real `LoanRepository.list_active_by_connection()` query. The `TerminateResult.flagged_loan_ids` field and the response schema are already shaped to carry loan IDs when M4 wires them — no API contract change required.
+3. **Loan flagging on termination (F-025 stub).** The `loans` table does not exist in M2. `ConnectionRepository.list_active_loans_by_connection()` returns `list[UUID]` (`[]`) as a deliberate no-op stub. M4 (F-033) adds the `loans` table. M4 must replace this stub with a real `LoanRepository.list_active_loans_by_connection()` query. The `TerminateResult.flagged_loan_ids: list[UUID]` field and the response schema are already shaped to carry loan IDs when M4 wires them — no API contract change required.
 
 4. **Connection scope (assets and accounts).** The architecture doc references `connection scope: supplier specifies which custodian accounts and asset types are in scope`. In M2, scope is captured via the `CustodianLink.scope` JSONB field (defaulting to `{}`). There is no M2 UI to set scope values — the supplier registers a key and the platform accepts whatever the custodian key covers. A dedicated scope configuration endpoint (`PUT /connections/{id}/scope`) is deferred to M3 or a separate feature.
 
 5. **Agent-initiated connections.** PRD open question OQ-3 asks whether either party can initiate. M2 implements supplier-only initiation (as the PRD assumption). If the product decision changes to allow agent-initiated connections, `invite()` will need a `direction` flag and agents will need an invitation inbox. The data model (supplier_id, agent_id on the connection) already supports either direction — the service logic is the only change needed.
 
-6. **Suspend → active re-activation path.** A suspended connection can have its key re-registered (the service allows `status in ("pending", "suspended")` for key registration). This allows re-activation of a suspended connection. If product decides suspended connections cannot be re-activated without a separate "unsuspend" action, a `POST /connections/{id}/unsuspend` endpoint should be added. Flag for M3 scoping.
+6. **Suspend → active re-activation path.** A suspended connection can have its key re-registered (the service allows `status in ("accepted", "suspended")` for key registration). This allows re-activation of a suspended connection. If product decides suspended connections cannot be re-activated without a separate "unsuspend" action, a `POST /connections/{id}/unsuspend` endpoint should be added. Flag for M3 scoping.
 
 7. **`op.get_bind()` deprecation.** Used in migrations 0007 and 0008 for ENUM `.create()` calls — consistent with M1 migrations 0002 and 0004. Safe in the current `run_sync` Alembic context. Will require migration to the async-compatible API when upgrading to Alembic 2.x. Tracked as a cross-cutting tech-debt item.
 
-8. **`notifications.user_id` fan-out.** F-025's `connection_terminated_rotate_key` notification currently sends only to `caller.user_id`. The PRD intends to notify **both** supplier and agent. In M2, we have only the caller's `user_id` — the counterparty's `user_id` requires a `users` table query by `org_id`. This is a known gap: the `notifier.send(recipients=[...])` call in F-025 should include both parties' user IDs once a `UserRepository.get_by_org_id()` helper is added. Flag for M3 enhancement.
+8. **`notifications.user_id` fan-out.** F-025's `connection_terminated_rotate_key` notification currently sends only to `caller.user_id`. The PRD intends to notify **both** supplier and agent. In M2, we have only the caller's `user_id` — the counterparty's `user_id` requires a `users` table query by `org_id`. This is a known gap: the `notifier.send(recipients=[...])` call in F-025 should include both parties' user IDs once a `UserRepository.get_by_org_id()` helper is added. Flag for M3 enhancement. Test stub: `test_terminate_by_agent_supplier_also_notified` — mark `# TODO(M3)` to prevent silent pass with wrong behavior when M3 wires multi-user notification.
+
+9. **Re-connection after termination.** Terminated pairs CAN re-invite, creating a new connection row. This is enforced by the partial unique index `uq_connections_supplier_agent_active` (`WHERE status != 'terminated'`) rather than a full unique constraint on `(supplier_id, agent_id)`. The `invite()` duplicate check queries only non-terminated connections (`get_by_supplier_and_agent_non_terminated`). A re-invite creates a brand-new row; the terminated row is preserved for audit. This is the explicit M2 design decision. If the business later decides re-connection requires a separate approval flow, the service layer is the only change needed — no schema change required.
+
+---
+
+## §11. Resolution log
+
+| Review finding | Severity | Fix applied in rev 2 |
+|---|---|---|
+| **#1** F-023 `accept()` is a silent no-op (`pending → pending`) | BLOCKER | Added `accepted` to `connection_status_enum` in migration 0008 (values now: `pending`, `accepted`, `active`, `suspended`, `terminated`). `ConnectionService.accept()` now transitions `pending → accepted`. F-023 acceptance criteria updated: response body `status="accepted"`. State machine diagram added to §3.3. ORM model updated. Test cases updated (`test_accept_200`, `test_accept_updates_db_status`, `test_accept_already_accepted_409`). Integration flow test step 2 now asserts `status="accepted"`. |
+| **#2** `UNIQUE(supplier_id, agent_id)` blocks re-connection after termination | BLOCKER | Replaced `sa.UniqueConstraint` with partial unique index `uq_connections_supplier_agent_active` (`WHERE status != 'terminated'`) in migration 0008. Removed `__table_args__` `UniqueConstraint` from ORM model. `ConnectionRepository.get_by_supplier_and_agent()` renamed to `get_by_supplier_and_agent_non_terminated()` and filters `status != 'terminated'`. `invite()` uses new method. §3.3 constraint description updated. §10 item 9 added documenting re-connect policy. Test cases added: `test_connection_reinvite_after_termination`, `test_invite_after_termination_201`. Integration flow test step 7 added. |
+| **#3** F-025 terminate stub not type-safe | MAJOR | `ConnectionRepository.list_active_loans_by_connection()` return type explicitly typed as `list[UUID]`. `TerminateResult.flagged_loan_ids` typed as `list[uuid.UUID]`. `TerminateResult.status` typed as `Literal["terminated"]`. `TerminateResponse.flagged_loan_ids` typed as `list[str]` (UUIDs serialized as strings for JSON). Router serializes: `[str(lid) for lid in result.flagged_loan_ids]`. |
+| **#4** `InviteConnectionRequest` mutual-exclusion has no Pydantic guard | MAJOR | Confirmed the global `RequestValidationError` handler (M1 baseline) wraps `model_validator` `ValueError` into `{"error": {...}}`. Moved mutual-exclusion check into a `@model_validator(mode="after")` on `InviteConnectionRequest`. Note added in §7.1 and §0 documenting this. Error table updated: missing/both-fields cases now show `code="validation_error"`. Test cases `test_invite_missing_both_fields_422` and `test_invite_both_fields_422` updated to assert `code="validation_error"`. |
+| **#5** Migration 0005 null-org guard needs conftest coverage | MAJOR | Added test `test_no_null_org_id_users_after_m1_fixtures` to §9 test plan. Documents it must run before `test_0005_migration_not_null_applies`. Ordering note included. |
