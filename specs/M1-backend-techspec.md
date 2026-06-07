@@ -7,22 +7,24 @@
 | Based on | MASTER_PRD.md v0.1, ARCHITECTURE.md v0.2, FEATURES.md, M0-backend-techspec.md |
 | Audience | Backend engineer implementing M1, extending the M0 codebase |
 | M0 spec ref | `specs/M0-backend-techspec.md` |
+| Status | Implementation-ready spec (rev 2 — tech-lead blockers/majors applied) |
 
 ---
 
 ## 0. Purpose and guiding principles
 
-M1 adds the onboarding layer: organizations (Supplier and Agent), the full user–org relationship, and Borrower management. At the end of M1, a Supplier or Agent can register via a single public endpoint, receive a JWT, and immediately call `GET /orgs/me`. An Agent can invite Borrowers. The system becomes a multi-tenant application for the first time.
+M1 adds the onboarding layer: organizations (Supplier and Agent), the full user–org relationship, and Borrower management. At the end of M1, a Supplier or Agent can register via a typed public endpoint, receive a JWT, and immediately call `GET /orgs/me`. An Agent can invite Borrowers. The system becomes a multi-tenant application for the first time.
 
 Non-negotiable conventions (identical to M0 — repeated for reference):
 
 - **Layer boundaries.** `API (routers) → domain services → data (repositories)`. Domain services **never** import FastAPI types (`Depends`, `HTTPException`, `Request`, status codes). They take `AuthUser` and typed inputs; they raise typed domain exceptions from `app/core/errors.py`.
-- **Error envelope.** All error responses: `{"error": {"code": "...", "message": "..."}}`.
+- **Error envelope.** All error responses: `{"error": {"code": "...", "message": "..."}}`. All 422 responses — whether from Pydantic validation or domain services — use this envelope (see §7.6 for the `RequestValidationError` handler that enforces this).
 - **Secrets.** Password never returned in any API response or logged. The secret-redaction log filter (`app/core/logging.py`) is the backstop; do not rely on it as the primary guard.
 - **PyJWT only.** `python-jose` is not used anywhere.
 - **Async all the way.** SQLAlchemy 2.x async sessions; all adapter Protocols remain `async def`.
 - **Pydantic Settings.** All env vars go through `app/core/config.py` `Settings`.
-- **structlog.** Use `get_logger` from `app/core/logging.py` everywhere — never bare `logging.getLogger`.
+- **Logging.** The M0 implementation uses stdlib `logging.getLogger` throughout (see `app/notifications/console_adapter.py`). M1 **does not** introduce `structlog` — use stdlib `logging.getLogger` for all M1 new code to remain consistent with the M0 baseline. The `structlog` mandate from the draft spec is rescinded. If `structlog` is adopted in a future milestone it must be added to `pyproject.toml` and all M0 call sites updated as a dedicated task.
+- **Email enumeration.** `POST /orgs/register/supplier` and `POST /orgs/register/agent` are public endpoints that return 409 on duplicate email, which is an email enumeration surface. Rate limiting is a deferred production-hardening task — flagged in §10.
 
 ### M0 baseline audit (what already exists)
 
@@ -31,8 +33,8 @@ Before speccing new things, here is what M0 actually shipped:
 | What | File | State |
 |---|---|---|
 | `users` table | `alembic/versions/0001_users_and_notifications.py` | Exists. Has `id`, `org_id` (nullable, no FK), `email`, `hashed_password`, `role`, `created_at`. No FK to `organizations` yet. |
-| `notifications` table | same migration | Exists. |
-| `User` ORM model | `app/models/user.py` | Exists. `org_id` is `nullable=True`, no FK relationship. |
+| `notifications` table | same migration | Exists. `notifications.user_id` has **no FK to `users`** — by design in M0 (no `organizations` table existed yet). This is a known gap; a migration must add `REFERENCES users(id)` before F-048 (`GET /notifications`) is built. |
+| `User` ORM model | `app/models/user.py` | Exists. `org_id` is `nullable=True`, no FK relationship. M1 **fully replaces** this file — it is not patched on top of the M0 version. |
 | `hash_password` / `verify_password` | `app/core/security.py` | Exists (`passlib` + `bcrypt`). |
 | `verify_password_safe` (constant-time) | `app/core/security.py` | Exists. |
 | `AuthUser` dataclass | `app/schemas/auth.py` | Exists. `org_id: UUID | None`. |
@@ -40,13 +42,14 @@ Before speccing new things, here is what M0 actually shipped:
 | `DomainError` hierarchy | `app/core/errors.py` | Exists: `NotFoundError`, `AuthError`, `Forbidden`, `ValidationError`, `ConflictError`, `SecretNotFoundError`, `AdapterError`. |
 | `require_role` / RBAC guards | `app/api/rbac.py` | Exists. |
 | `NotificationService` Protocol | `app/notifications/interface.py` | Exists. |
-| `ConsoleNotificationAdapter` | `app/notifications/console_adapter.py` | Exists. |
+| `ConsoleNotificationAdapter` | `app/notifications/console_adapter.py` | Exists. Uses `logging.getLogger` — consistent with M1 convention above. |
 
 **M1 obligations against the M0 baseline:**
 
 1. `organizations` table must be created (F-011) before the users FK can be added.
-2. A new migration (F-012 delta) must `ALTER TABLE users ADD CONSTRAINT fk_users_org_id_organizations FOREIGN KEY (org_id) REFERENCES organizations(id)` and add `ops_contact_email` column to `users` for agents.
-3. `User.role` remains on the `User` model (denormalized from `Organization.role`) — this was the M0 decision. It stays in M1 for JWT issuance simplicity; tech-lead flagged for review in §10.
+2. A new migration (F-012 delta) must `ALTER TABLE users ADD CONSTRAINT fk_users_org_id_organizations FOREIGN KEY (org_id) REFERENCES organizations(id)` — after scrubbing orphaned `org_id` values (see §3.3 BLOCKER #2 fix).
+3. `ops_contact_email` and `regulatory_status_attested` belong on the **`organizations`** table (not `users`) — per tech-lead Decision 3. See §3.2 and §4.1.
+4. `User.role` remains on the `User` model (denormalized from `Organization.role`) — this was the M0 decision. It stays in M1 for JWT issuance simplicity. Invariant: `User.role` must always equal `Organization.role`; there is no automated DB enforcement. Revisit before M4.
 
 ---
 
@@ -57,14 +60,14 @@ M1 delivers the following backend-only features:
 | Feature | What | Public? |
 |---|---|---|
 | **F-011** | `organizations` DB table + Alembic migration | — |
-| **F-012** | `users` FK migration + `ops_contact_email` column + password utility audit | — |
-| **F-013** | `POST /orgs/register` with `role=supplier` | Yes (unauthenticated) |
-| **F-015** | `POST /orgs/register` with `role=agent` | Yes (unauthenticated) |
+| **F-012** | `users` FK migration + password utility audit | — |
+| **F-013** | `POST /orgs/register/supplier` (role=supplier) | Yes (unauthenticated) |
+| **F-015** | `POST /orgs/register/agent` (role=agent) | Yes (unauthenticated) |
 | **F-017** | `borrowers` DB table + Alembic migration | — |
 | **F-018** | `POST /borrowers/invite` (agent-only) + `GET /borrowers/{id}` | Agent JWT |
 | **F-019** | `GET /orgs/me` | Any valid JWT |
 
-F-013 and F-015 share a single endpoint (`POST /orgs/register`). Role is determined by the `role` field in the request body. The endpoint is role-dispatched inside `OrgService`.
+F-013 and F-015 are **separate endpoints** (`POST /orgs/register/supplier` and `POST /orgs/register/agent`) — each takes its own typed Pydantic request model. There is no shared discriminated-union endpoint. This eliminates the FastAPI ≤0.115 OpenAPI schema-generation bug with top-level discriminated unions (BLOCKER #1).
 
 F-014 and F-016 are React frontend features — **not specced here**.
 
@@ -80,14 +83,14 @@ backend/
 │   └── versions/
 │       ├── 0001_users_and_notifications.py       (M0 — unchanged)
 │       ├── 0002_organizations.py                 [NEW] F-011
-│       ├── 0003_users_org_fk_and_agent_fields.py [NEW] F-012 delta
+│       ├── 0003_users_org_fk.py                  [NEW] F-012 delta
 │       └── 0004_borrowers.py                     [NEW] F-017
 ├── app/
-│   ├── main.py                                   [CHANGED] include orgs + borrowers routers
+│   ├── main.py                                   [CHANGED] include orgs + borrowers routers; add RequestValidationError handler
 │   ├── core/
-│   │   └── config.py                             [CHANGED] no new env vars needed for M1
+│   │   └── errors.py                             [CHANGED] add RequestValidationError handler (see §7.6)
 │   ├── models/
-│   │   ├── user.py                               [CHANGED] add FK relationship, ops_contact_email
+│   │   ├── user.py                               [CHANGED — FULL REPLACEMENT] add FK relationship; remove ops_contact_email/regulatory_status_attested (moved to Organization)
 │   │   ├── organization.py                       [NEW] F-011
 │   │   └── borrower.py                           [NEW] F-017
 │   ├── schemas/
@@ -95,24 +98,25 @@ backend/
 │   │   ├── orgs.py                               [NEW] request/response models for F-013, F-015, F-019
 │   │   └── borrowers.py                          [NEW] request/response models for F-018
 │   ├── services/
-│   │   ├── auth_service.py                       [CHANGED] UserRepository moved here gains create_user
+│   │   ├── auth_service.py                       [CHANGED] UserRepository import updated
 │   │   ├── org_service.py                        [NEW] F-013, F-015, F-019
 │   │   └── borrower_service.py                   [NEW] F-018
 │   ├── repositories/
 │   │   ├── __init__.py                           [NEW] package
+│   │   ├── user_repository.py                    [NEW] UserRepository moved here from auth_service.py (Decision 6)
 │   │   ├── org_repository.py                     [NEW] F-011/F-013/F-015/F-019
 │   │   └── borrower_repository.py                [NEW] F-017/F-018
 │   └── api/
-│       ├── deps.py                               [CHANGED] add get_org_service, get_borrower_service
+│       ├── deps.py                               [CHANGED] add get_org_service, get_borrower_service; update UserRepository import
 │       └── routers/
-│           ├── orgs.py                           [NEW] POST /orgs/register, GET /orgs/me
+│           ├── orgs.py                           [NEW] POST /orgs/register/supplier, POST /orgs/register/agent, GET /orgs/me
 │           └── borrowers.py                      [NEW] POST /borrowers/invite, GET /borrowers/{id}
 └── tests/
     ├── test_orgs.py                              [NEW] F-011, F-013, F-015, F-019
     └── test_borrowers.py                         [NEW] F-017, F-018
 ```
 
-> **Repository package note:** M0 put `UserRepository` inside `app/services/auth_service.py` as a co-located class. For M1, new repositories (`OrgRepository`, `BorrowerRepository`) go into a dedicated `app/repositories/` package. `UserRepository` stays in `auth_service.py` for M0 backwards-compat but gains a `create_user` method. A future cleanup can consolidate all repositories — flag in §10.
+> **Repository package consolidation (Decision 6 — required M1 task, not deferred):** `UserRepository` is moved from `app/services/auth_service.py` to `app/repositories/user_repository.py`. `auth_service.py` imports it from the new location. `deps.py` also imports from the new location. This is required M1 work — leaving `UserRepository` in `auth_service.py` while all other repositories live in `repositories/` creates an inconsistency that worsens in M2.
 
 ---
 
@@ -132,23 +136,32 @@ CREATE TYPE org_role_enum AS ENUM ('supplier', 'agent', 'admin');
 CREATE TYPE entity_type_enum AS ENUM ('fund', 'corporate_treasury', 'foundation', 'agent');
 ```
 
+> **Note:** The DB ENUM retains `'agent'` as a value (it is in the ARCHITECTURE.md data model and removing it requires a migration). However, the public Pydantic schema `EntityType` does **not** expose `'agent'` as a valid value for the registration endpoints — see §7.1. The value is reserved for future internal/admin use.
+
+**`org_status_enum`** (also in migration `0002`):
+```sql
+CREATE TYPE org_status_enum AS ENUM ('pending_review', 'approved', 'rejected');
+```
+
 **`borrower_status_enum`** (created in migration `0004`):
 ```sql
 CREATE TYPE borrower_status_enum AS ENUM ('invited', 'active');
 ```
 
-> ENUMs are created with `sa.Enum(..., name="...", create_type=True)` in `op.create_table` calls, which emits `CREATE TYPE` before the table DDL. Downgrade drops the table first, then the type.
+> ENUMs are created with `sa.Enum(..., name="...", create_type=True)` and `.create(op.get_bind(), checkfirst=True)` inside migration functions that run under `run_sync` (from the M0 async Alembic `env.py`). `op.get_bind()` is safe in this context because it runs on the synchronous connection provided by `run_sync`. Note: `op.get_bind()` is deprecated in Alembic 1.14+ and will require replacement when upgrading to Alembic 2.x — flag for future upgrade.
 
 ### 3.2 Migration 0002 — `organizations` (F-011)
 
 **Revision:** `0002`
 **Down-revision:** `0001`
-**Depends on:** `0001` (users + notifications must exist first, even though organizations does not reference users — because the FK in 0003 runs after both)
+
+> **`ops_contact_email` placement (Decision 3):** `ops_contact_email` and `regulatory_status_attested` are columns on `organizations`, not on `users`. `ops_contact_email` is an entity-level contact (the settlement/operations desk for the org), not a property of a specific user account. Placing it on `users` creates an ambiguity when the org later has multiple users. Migration 0002 adds both columns to the `organizations` table. Migration 0003 does **not** add them to `users`.
 
 ```python
 # alembic/versions/0002_organizations.py
 
-"""organizations table
+"""organizations table — includes ops_contact_email and regulatory_status_attested
+(Decision 3: these are org-level fields, not user-level fields).
 
 Revision ID: 0002
 Revises: 0001
@@ -181,6 +194,8 @@ org_status_enum = sa.Enum(
 )
 
 def upgrade() -> None:
+    # op.get_bind() is safe here: runs inside run_sync in the async Alembic env.py.
+    # Note: deprecated in Alembic 1.14+; requires update for Alembic 2.x.
     org_role_enum.create(op.get_bind(), checkfirst=True)
     entity_type_enum.create(op.get_bind(), checkfirst=True)
     org_status_enum.create(op.get_bind(), checkfirst=True)
@@ -202,6 +217,13 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("contact_email", sa.String(320), nullable=False),
+        sa.Column("ops_contact_email", sa.String(320), nullable=True),
+        sa.Column(
+            "regulatory_status_attested",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("false"),
+        ),
         sa.Column(
             "status",
             sa.Enum("pending_review", "approved", "rejected",
@@ -225,6 +247,7 @@ def downgrade() -> None:
     op.drop_index("ix_organizations_role", table_name="organizations")
     op.drop_index("ix_organizations_contact_email", table_name="organizations")
     op.drop_table("organizations")
+    # Drop in exact reverse creation order:
     org_status_enum.drop(op.get_bind(), checkfirst=True)
     entity_type_enum.drop(op.get_bind(), checkfirst=True)
     org_role_enum.drop(op.get_bind(), checkfirst=True)
@@ -237,29 +260,42 @@ def downgrade() -> None:
 | `id` | `UUID` | PK NOT NULL | `uuid.uuid4()` default in ORM |
 | `name` | `TEXT` | NOT NULL | Legal entity name |
 | `jurisdiction` | `TEXT` | NOT NULL | e.g. "Delaware, USA" |
-| `entity_type` | `entity_type_enum` | NOT NULL | DB-level ENUM enforcement |
+| `entity_type` | `entity_type_enum` | NOT NULL | DB ENUM includes `'agent'`; public API schema excludes it (§7.1) |
 | `role` | `org_role_enum` | NOT NULL | DB-level ENUM enforcement |
 | `contact_email` | `VARCHAR(320)` | NOT NULL UNIQUE | Primary contact email; also the login email for the first user |
+| `ops_contact_email` | `VARCHAR(320)` | NULLABLE | Settlement/operations contact for agent orgs; NULL for supplier orgs. Must differ from `contact_email` (enforced in service layer). |
+| `regulatory_status_attested` | `BOOLEAN` | NOT NULL DEFAULT `false` | Set `true` on agent registration. Enforced in domain service (not Pydantic model_validator). |
 | `status` | `org_status_enum` | NOT NULL DEFAULT `pending_review` | For F-058 admin approval flow |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | |
 
-> **`status` column justification:** F-058 (admin org approval, also M1 per the feature index) requires `approved` / `rejected` states. Adding `status` here in the same migration avoids a 5th migration just for F-058 DDL. The enum has three values: `pending_review` (default on creation), `approved`, `rejected`. In MVP orgs are auto-approved (OrgService sets `status=approved` immediately on registration); the field exists for F-058's manual override.
+> **`status` column justification:** F-058 (admin org approval) requires `approved` / `rejected` states. Adding `status` here avoids a fifth migration. In MVP, orgs are auto-approved (`OrgService` sets `status=approved` immediately on registration); the field exists for F-058's manual override.
 
-> **`ops_contact_email` on `Organization` vs `User`:** The F-015 feature requires an `ops_contact_email` for agents. After review this belongs on the `User` model (as the second user of the org) rather than on `Organization`, because it represents a person, not the org entity. See §4 and migration 0003 for the column placement decision. Flag in §10 if tech lead prefers it on the org.
-
-### 3.3 Migration 0003 — users FK + agent fields (F-012 delta)
+### 3.3 Migration 0003 — users FK (F-012 delta)
 
 **What already exists in M0:** The `users` table with `id`, `org_id` (nullable UUID, no FK), `email`, `hashed_password`, `role`, `created_at`.
 
-**What M1 adds:**
+**What M1 adds:** FK constraint from `users.org_id → organizations.id`.
 
-1. FK constraint from `users.org_id → organizations.id`.
-2. `ops_contact_email` column on `users` (nullable — only populated for agent users).
+> **BLOCKER #2 fix — data scrub before FK creation:** Migration 0001 stored `org_id` as a plain nullable UUID with no FK constraint. Test seeds or seed scripts may have written non-NULL UUIDs into `users.org_id` that have no corresponding row in `organizations`. If any such orphaned rows exist, `op.create_foreign_key` will fail with a FK violation. The upgrade function therefore:
+> 1. Deletes rows where `org_id IS NULL OR org_id NOT IN (SELECT id FROM organizations)` — this removes M0 seed users that either have no org or have a fabricated org UUID.
+> 2. Adds the FK constraint with `NOT VALID` — skips validation of existing rows during the DDL statement (faster, avoids table lock on large tables).
+> 3. Immediately validates with `ALTER TABLE users VALIDATE CONSTRAINT` — performs a sequential scan to confirm all remaining rows satisfy the FK. If any orphaned rows slipped through step 1, this will fail loudly rather than silently.
 
 ```python
-# alembic/versions/0003_users_org_fk_and_agent_fields.py
+# alembic/versions/0003_users_org_fk.py
 
-"""users org FK and agent fields
+"""users org FK
+
+Adds foreign key from users.org_id to organizations.id.
+
+IMPORTANT: Before adding the FK, this migration scrubs M0 seed users whose
+org_id is NULL or points to a non-existent organization row. These rows are
+test/seed artifacts from M0 (when no organizations table existed). Any such
+rows are deleted — do not run this migration in an environment where M0 seed
+users must be preserved without a prior org-assignment data migration.
+
+After the FK is added with NOT VALID, the constraint is immediately validated
+via ALTER TABLE ... VALIDATE CONSTRAINT to ensure no orphaned rows remain.
 
 Revision ID: 0003
 Revises: 0002
@@ -275,23 +311,15 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
-    # Add ops_contact_email to users (agent-only; nullable for supplier users)
-    op.add_column(
-        "users",
-        sa.Column("ops_contact_email", sa.String(320), nullable=True),
+    # Step 1: Remove rows with NULL org_id or orphaned (non-existent) org_id.
+    # This handles M0 seed users created before the organizations table existed.
+    op.execute(
+        "DELETE FROM users WHERE org_id IS NULL "
+        "OR org_id NOT IN (SELECT id FROM organizations)"
     )
-    # Add regulatory_status_attested to users (agent registration requirement)
-    op.add_column(
-        "users",
-        sa.Column(
-            "regulatory_status_attested",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.text("false"),
-        ),
-    )
-    # Add FK from users.org_id → organizations.id
-    # Existing rows have org_id=NULL (M0 seed users); FK allows NULL so they remain valid.
+
+    # Step 2: Add the FK constraint with NOT VALID to skip row-level validation
+    # during DDL (avoids a full-table lock on large deployments).
     op.create_foreign_key(
         "fk_users_org_id_organizations",
         "users",
@@ -301,24 +329,30 @@ def upgrade() -> None:
         ondelete="RESTRICT",
     )
 
+    # Step 3: Validate the constraint — performs a sequential scan.
+    # If any orphaned rows survived step 1, this raises immediately.
+    op.execute(
+        "ALTER TABLE users VALIDATE CONSTRAINT fk_users_org_id_organizations"
+    )
+
 def downgrade() -> None:
     op.drop_constraint("fk_users_org_id_organizations", "users", type_="foreignkey")
-    op.drop_column("users", "regulatory_status_attested")
-    op.drop_column("users", "ops_contact_email")
 ```
+
+> **Note:** After migration 0003, `users.org_id` is still technically nullable at the DB level. The NOT NULL constraint will be enforced in a M2 migration (`0005_users_org_id_not_null.py`) once all seed users have been assigned orgs — see §8 and §10 Decision 1.
 
 **Full `users` column set after 0001 + 0003:**
 
 | Column | Type | Constraints | Notes |
 |---|---|---|---|
 | `id` | `UUID` | PK NOT NULL | |
-| `org_id` | `UUID` | NULLABLE FK → `organizations.id` ON DELETE RESTRICT | Null for M0 seed users; always set post-M1 registration |
+| `org_id` | `UUID` | NULLABLE FK → `organizations.id` ON DELETE RESTRICT | Null rows scrubbed by 0003 upgrade; always set post-M1 registration |
 | `email` | `VARCHAR(320)` | NOT NULL UNIQUE INDEX | Login email |
 | `hashed_password` | `VARCHAR(255)` | NOT NULL | bcrypt hash; never returned in API |
 | `role` | `VARCHAR(16)` | NOT NULL DEFAULT `supplier` | Denormalized from org role for JWT issuance |
-| `ops_contact_email` | `VARCHAR(320)` | NULLABLE | Set for agent users only |
-| `regulatory_status_attested` | `BOOLEAN` | NOT NULL DEFAULT `false` | Set `true` on agent registration |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `now()` | |
+
+> `ops_contact_email` and `regulatory_status_attested` are on the `organizations` table (migration 0002), not on `users`.
 
 ### 3.4 Migration 0004 — `borrowers` (F-017)
 
@@ -409,13 +443,15 @@ def downgrade() -> None:
 
 ### 4.1 `Organization` (`app/models/organization.py`)
 
+> Includes `ops_contact_email` and `regulatory_status_attested` (Decision 3 — these are org-level fields).
+
 ```python
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
-from sqlalchemy import String, Text, DateTime, func
+from sqlalchemy import Boolean, String, Text, DateTime, func
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -447,6 +483,14 @@ class Organization(Base):
         nullable=False,
     )
     contact_email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    # ops_contact_email: agent orgs only; NULL for supplier orgs.
+    # Must differ from contact_email — enforced in OrgService.register_agent, not DB.
+    ops_contact_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    # regulatory_status_attested: agent orgs must set True on registration.
+    # Enforced in OrgService.register_agent (domain layer), not Pydantic model_validator.
+    regulatory_status_attested: Mapped[bool] = mapped_column(
+        Boolean(), nullable=False, server_default=sa.text("false")
+    )
     status: Mapped[str] = mapped_column(
         sa.Enum(
             "pending_review", "approved", "rejected",
@@ -460,21 +504,23 @@ class Organization(Base):
     )
 
     # Relationship: one org → many users (back-populated in User model)
+    # lazy="noload" prevents accidental N+1 lazy-loads in async context.
+    # Load explicitly via selectinload(Organization.users) when needed.
     users: Mapped[list["User"]] = relationship("User", back_populates="org", lazy="noload")
 ```
 
-> `lazy="noload"` prevents accidental N+1 lazy-loads in async context. Relationships must be explicitly loaded via `selectinload` or `joinedload` when needed.
-
 ### 4.2 Updated `User` (`app/models/user.py`)
 
-Changes from M0: add `ops_contact_email`, `regulatory_status_attested`, FK relationship to `Organization`.
+> **IMPORTANT: This is a full file replacement, not a patch.** The M0 `User` model has no `org` relationship attribute. M1 adds the FK relationship. The engineer must replace `backend/app/models/user.py` entirely with this version — not add lines to the existing file.
+>
+> `ops_contact_email` and `regulatory_status_attested` are **not** on this model — they were moved to `Organization` (Decision 3).
 
 ```python
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -492,20 +538,17 @@ class User(Base):
     org_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("organizations.id", name="fk_users_org_id_organizations", ondelete="RESTRICT"),
-        nullable=True,  # Nullable for M0 seed users; always set post-M1 registration
+        nullable=True,  # Nullable until M2 gate migration (0005_users_org_id_not_null)
     )
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False, server_default="supplier")
-    ops_contact_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
-    regulatory_status_attested: Mapped[bool] = mapped_column(
-        Boolean(), nullable=False, server_default="false"
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    # Relationship
+    # Relationship — load explicitly via selectinload(User.org) when needed.
+    # lazy="noload" prevents implicit async lazy-load errors.
     org: Mapped["Organization | None"] = relationship(
         "Organization", back_populates="users", lazy="noload"
     )
@@ -547,6 +590,8 @@ class Borrower(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # No ORM relationship to Organization for invited_by — load explicitly via join if needed.
+    # Keeping this as a bare FK column avoids accidental eager-loads in async context.
 ```
 
 ### 4.4 `app/models/__init__.py` update
@@ -563,15 +608,48 @@ from app.models.user import User                  # noqa: F401
 
 ---
 
-## §5. New repositories
+## §5. Repositories
 
 Repository classes extend `BaseRepository[T]` from `app/db/repository.py`. All methods are `async`. No raw SQL — only SQLAlchemy ORM expressions.
 
-### 5.1 `OrgRepository` (`app/repositories/org_repository.py`)
+### 5.1 `UserRepository` (`app/repositories/user_repository.py`)
+
+> **Decision 6 — moved from `auth_service.py` to `repositories/` in M1 (required, not deferred).** `auth_service.py` must update its import. `deps.py` must update its import.
 
 ```python
+# app/repositories/user_repository.py
 from uuid import UUID
 
+from app.db.repository import BaseRepository
+from app.models.user import User
+
+
+class UserRepository(BaseRepository[User]):
+    model = User
+
+    async def get_by_email(self, email: str) -> User | None:
+        rows = await self.list_where(User.email == email)
+        return rows[0] if rows else None
+
+    async def create_user(
+        self,
+        *,
+        org_id: UUID,
+        email: str,
+        hashed_password: str,
+        role: str,
+    ) -> User:
+        return await self.create(
+            org_id=org_id,
+            email=email,
+            hashed_password=hashed_password,
+            role=role,
+        )
+```
+
+### 5.2 `OrgRepository` (`app/repositories/org_repository.py`)
+
+```python
 from sqlalchemy import select
 
 from app.db.repository import BaseRepository
@@ -586,17 +664,15 @@ class OrgRepository(BaseRepository[Organization]):
         rows = await self.list_where(Organization.contact_email == email)
         return rows[0] if rows else None
 
-    async def get_by_id(self, org_id: UUID) -> Organization:
-        """Alias for BaseRepository.get with typed return. Raises NotFoundError."""
-        return await self.get(org_id)
-
     async def list_all(self) -> list[Organization]:
         """Return all orgs. Used by F-058 admin endpoint."""
         result = await self.session.execute(select(Organization))
         return list(result.scalars().all())
 ```
 
-### 5.2 `BorrowerRepository` (`app/repositories/borrower_repository.py`)
+> `get_by_id` is removed — callers use `self.orgs.get(org_id)` (from `BaseRepository`) directly. A thin alias with no additional query logic adds confusion (finding #11).
+
+### 5.3 `BorrowerRepository` (`app/repositories/borrower_repository.py`)
 
 ```python
 from uuid import UUID
@@ -617,38 +693,6 @@ class BorrowerRepository(BaseRepository[Borrower]):
         return await self.list_where(Borrower.invited_by == org_id)
 ```
 
-### 5.3 `UserRepository` update (`app/services/auth_service.py`)
-
-`UserRepository` gains a `create_user` method needed by `OrgService` during registration:
-
-```python
-class UserRepository(BaseRepository[User]):
-    model = User
-
-    async def get_by_email(self, email: str) -> User | None:
-        rows = await self.list_where(User.email == email)
-        return rows[0] if rows else None
-
-    async def create_user(
-        self,
-        *,
-        org_id: UUID,
-        email: str,
-        hashed_password: str,
-        role: str,
-        ops_contact_email: str | None = None,
-        regulatory_status_attested: bool = False,
-    ) -> User:
-        return await self.create(
-            org_id=org_id,
-            email=email,
-            hashed_password=hashed_password,
-            role=role,
-            ops_contact_email=ops_contact_email,
-            regulatory_status_attested=regulatory_status_attested,
-        )
-```
-
 ---
 
 ## §6. Domain services
@@ -657,22 +701,25 @@ class UserRepository(BaseRepository[User]):
 
 ### 6.1 `OrgService` (`app/services/org_service.py`)
 
+Key changes from draft:
+- `ops_contact_email` and `regulatory_status_attested` are passed to `orgs.create(...)`, not `users.create_user(...)`.
+- Attestation check is **in the service** (not in Pydantic `model_validator`) — raises `ValidationError(code="attestation_required")` which routes through the existing domain exception handler to the correct envelope.
+- `ops_contact_email == contact_email` self-collision guard (BLOCKER #4).
+
 ```python
 """OrgService — domain service for org registration and lookup. No FastAPI imports."""
 import uuid
+import logging
 from dataclasses import dataclass
-from typing import Literal
 
 from app.core.errors import ConflictError, Forbidden, NotFoundError, ValidationError
-from app.core.logging import get_logger
-from app.core.security import hash_password
-from app.core.security import create_access_token
+from app.core.security import hash_password, create_access_token
 from app.models.organization import Organization
 from app.repositories.org_repository import OrgRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas.auth import AuthUser
-from app.services.auth_service import UserRepository
 
-log = get_logger("lendrail.services.org")
+log = logging.getLogger("lendrail.services.org")
 
 # ── Input DTOs (plain dataclasses — no FastAPI types) ─────────────────────────
 
@@ -680,7 +727,7 @@ log = get_logger("lendrail.services.org")
 class SupplierRegistrationInput:
     name: str
     jurisdiction: str
-    entity_type: str          # validated against ENUM before reaching service
+    entity_type: str          # validated against Pydantic Literal before reaching service
     contact_email: str
     password: str             # plaintext — hashed inside service, never stored raw
 
@@ -732,7 +779,7 @@ class OrgService:
             contact_email=data.contact_email,
             status="approved",   # auto-approved in MVP; F-058 provides manual override
         )
-        log.info("org_created", org_id=str(org.id), role="supplier")
+        log.info("org_created org_id=%s role=supplier", org.id)
 
         user = await self.users.create_user(
             org_id=org.id,
@@ -740,9 +787,8 @@ class OrgService:
             hashed_password=hash_password(data.password),
             role="supplier",
         )
-        log.info("user_created", user_id=str(user.id), org_id=str(org.id))
-        # password is NOT logged — hash_password result is not a secret but raw password
-        # must never be passed to log. This is guaranteed by only logging IDs here.
+        log.info("user_created user_id=%s org_id=%s", user.id, org.id)
+        # data.password is NEVER passed to log — only IDs are logged.
 
         token = create_access_token(
             user_id=str(user.id),
@@ -753,10 +799,19 @@ class OrgService:
 
     async def register_agent(self, data: AgentRegistrationInput) -> RegistrationResult:
         """Create an Organization with role=agent and its first User."""
+        # BLOCKER #3 fix: attestation check is here in the service (not model_validator).
+        # Raises ValidationError → existing handler → {"error": {"code": "attestation_required", ...}}
         if not data.regulatory_status_attested:
             raise ValidationError(
-                "Regulatory status attestation is required for agent registration",
+                "regulatory_status_attested must be true to register as an agent",
                 code="attestation_required",
+            )
+
+        # BLOCKER #4 fix: ops_contact_email must differ from primary contact_email.
+        if data.ops_contact_email == data.contact_email:
+            raise ValidationError(
+                "Ops contact email must differ from primary contact email",
+                code="invalid_ops_email",
             )
 
         await self._assert_email_unique(data.contact_email)
@@ -768,19 +823,19 @@ class OrgService:
             entity_type=data.entity_type,
             role="agent",
             contact_email=data.contact_email,
+            ops_contact_email=data.ops_contact_email,
+            regulatory_status_attested=True,
             status="approved",
         )
-        log.info("org_created", org_id=str(org.id), role="agent")
+        log.info("org_created org_id=%s role=agent", org.id)
 
         user = await self.users.create_user(
             org_id=org.id,
             email=data.contact_email,
             hashed_password=hash_password(data.password),
             role="agent",
-            ops_contact_email=data.ops_contact_email,
-            regulatory_status_attested=True,
         )
-        log.info("user_created", user_id=str(user.id), org_id=str(org.id))
+        log.info("user_created user_id=%s org_id=%s", user.id, org.id)
 
         token = create_access_token(
             user_id=str(user.id),
@@ -793,7 +848,7 @@ class OrgService:
         """Return the authenticated user's organization record."""
         if caller.org_id is None:
             raise Forbidden("User is not associated with any organization")
-        org = await self.orgs.get_by_id(caller.org_id)   # raises NotFoundError if missing
+        org = await self.orgs.get(caller.org_id)   # BaseRepository.get — raises NotFoundError if missing
         return OrgProfile(
             id=org.id,
             name=org.name,
@@ -814,7 +869,7 @@ class OrgService:
                 f"An organization with email '{email}' already exists",
                 code="duplicate_email",
             )
-        # Also check users table — an email may exist as a user without an org (M0 seed)
+        # Also check users table — an email may exist as a user without an org (M0 seed edge case)
         existing_user = await self.users.get_by_email(email)
         if existing_user is not None:
             raise ConflictError(
@@ -827,19 +882,21 @@ class OrgService:
 
 ### 6.2 `BorrowerService` (`app/services/borrower_service.py`)
 
+> **`notifications.user_id` gap:** The M0 `notifications` table has no FK from `user_id` to `users.id` (by design — no organizations existed in M0). The `ConsoleNotificationAdapter` writes a `notifications` DB row per recipient. For F-018 the recipient is `caller.user_id` (the agent's `user_id`), which is a valid `users.id`. The call is correct for M1. However the missing FK is a latent integrity issue: a migration must add `REFERENCES users(id)` before F-048 (`GET /notifications`) is built. Flag in M2 scope.
+
 ```python
 """BorrowerService — domain service for borrower management. No FastAPI imports."""
 import uuid
+import logging
 from dataclasses import dataclass
 
 from app.core.errors import ConflictError, Forbidden, NotFoundError
-from app.core.logging import get_logger
 from app.models.borrower import Borrower
 from app.notifications.interface import NotificationEvent, NotificationService
 from app.repositories.borrower_repository import BorrowerRepository
 from app.schemas.auth import AuthUser
 
-log = get_logger("lendrail.services.borrower")
+log = logging.getLogger("lendrail.services.borrower")
 
 # ── Input DTOs ────────────────────────────────────────────────────────────────
 
@@ -897,9 +954,9 @@ class BorrowerService:
             status="invited",
         )
         log.info(
-            "borrower_invited",
-            borrower_id=str(borrower.id),
-            invited_by=str(caller.org_id),
+            "borrower_invited borrower_id=%s invited_by=%s",
+            borrower.id,
+            caller.org_id,
         )
 
         await self.notifier.send(
@@ -908,7 +965,7 @@ class BorrowerService:
                 recipients=[caller.user_id],
                 payload={
                     "borrower_id": str(borrower.id),
-                    "borrower_email": data.contact_email,   # email in payload, not a secret
+                    "borrower_email": data.contact_email,
                     "borrower_name": data.name,
                 },
             )
@@ -944,56 +1001,51 @@ def _to_result(b: Borrower) -> BorrowerResult:
 
 ### 7.1 Pydantic request/response schemas (`app/schemas/orgs.py`)
 
+> **BLOCKER #1 fix — split endpoints, no discriminated union:** The draft used a discriminated union `OrgRegisterRequest` on a single `POST /orgs/register` endpoint. FastAPI ≤0.115 cannot emit a valid `requestBody` schema for a top-level discriminated union, breaking `/openapi.json`. M1 uses two separate endpoints (`POST /orgs/register/supplier`, `POST /orgs/register/agent`), each with its own typed Pydantic model. The discriminated union and `OrgRegisterRequest` type are removed entirely.
+>
+> **BLOCKER #3 fix — no `model_validator` on `AgentRegisterRequest`:** The attestation check is done in `OrgService.register_agent` (see §6.1). Placing it in a Pydantic `model_validator` produces FastAPI's default `{"detail": [...]}` 422 shape, not the required `{"error": {...}}` envelope.
+>
+> **MAJOR #4 — `EntityType` removes `"agent"` from public schema (Decision 8):** The public registration endpoints only accept `"fund"`, `"corporate_treasury"`, `"foundation"`. The DB ENUM retains `"agent"` for future internal/admin use.
+>
+> **MAJOR #3 — password minimum raised to 12 characters (Decision 7).**
+
 ```python
+# app/schemas/orgs.py
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field
 
 # ── Shared ENUM literals ──────────────────────────────────────────────────────
 
-EntityType = Literal["fund", "corporate_treasury", "foundation", "agent"]
+# "agent" is intentionally excluded from the public EntityType.
+# The DB entity_type_enum retains "agent" for future internal/admin use.
+# See §11 Resolution log — Decision 8.
+EntityType = Literal["fund", "corporate_treasury", "foundation"]
 OrgRole = Literal["supplier", "agent"]    # admin cannot self-register
 
 # ── Request models ────────────────────────────────────────────────────────────
 
 class SupplierRegisterRequest(BaseModel):
-    role: Literal["supplier"]
     name: str = Field(..., min_length=1, max_length=255)
     jurisdiction: str = Field(..., min_length=1, max_length=255)
     entity_type: EntityType
     contact_email: EmailStr
-    password: str = Field(..., min_length=8, max_length=128)
+    password: str = Field(..., min_length=12, max_length=128)
 
 class AgentRegisterRequest(BaseModel):
-    role: Literal["agent"]
     name: str = Field(..., min_length=1, max_length=255)
     jurisdiction: str = Field(..., min_length=1, max_length=255)
     entity_type: EntityType
     contact_email: EmailStr
-    password: str = Field(..., min_length=8, max_length=128)
+    password: str = Field(..., min_length=12, max_length=128)
     ops_contact_email: EmailStr
     regulatory_status_attested: bool
-
-    @model_validator(mode="after")
-    def attestation_must_be_true(self) -> "AgentRegisterRequest":
-        if not self.regulatory_status_attested:
-            raise ValueError("regulatory_status_attested must be true to register as an agent")
-        return self
-
-# ── Discriminated union for the shared endpoint ───────────────────────────────
-# FastAPI resolves this by reading `role` first (Pydantic discriminated union).
-
-from typing import Annotated, Union
-from pydantic import Discriminator, Tag
-
-OrgRegisterRequest = Annotated[
-    Union[
-        Annotated[SupplierRegisterRequest, Tag("supplier")],
-        Annotated[AgentRegisterRequest, Tag("agent")],
-    ],
-    Discriminator("role"),
-]
+    # NOTE: No model_validator for regulatory_status_attested.
+    # The attestation check (and the ops_contact_email != contact_email check)
+    # is performed in OrgService.register_agent, which raises ValidationError
+    # with the correct code. This ensures the {"error": {...}} envelope is used
+    # for all 422s (the global RequestValidationError handler covers Pydantic 422s).
 
 # ── Response models ───────────────────────────────────────────────────────────
 
@@ -1039,7 +1091,9 @@ class BorrowerDetailResponse(BaseModel):
     created_at: str
 ```
 
-### 7.3 `POST /orgs/register` router (`app/api/routers/orgs.py`)
+### 7.3 Orgs router (`app/api/routers/orgs.py`)
+
+> **BLOCKER #1 fix — two separate endpoints, no discriminated union dispatch.**
 
 ```python
 """Org registration and profile endpoints."""
@@ -1050,7 +1104,6 @@ from app.schemas.auth import AuthUser
 from app.schemas.orgs import (
     AgentRegisterRequest,
     OrgMeResponse,
-    OrgRegisterRequest,
     OrgRegisterResponse,
     SupplierRegisterRequest,
 )
@@ -1060,50 +1113,75 @@ router = APIRouter(prefix="/orgs", tags=["orgs"])
 
 
 @router.post(
-    "/register",
+    "/register/supplier",
     response_model=OrgRegisterResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Register a new organization (supplier or agent)",
+    summary="Register a new supplier organization",
 )
-async def register_org(
-    body: OrgRegisterRequest,       # discriminated union resolved by Pydantic on 'role'
+async def register_supplier(
+    body: SupplierRegisterRequest,
     svc: OrgService = Depends(get_org_service),
 ) -> OrgRegisterResponse:
     """
     Public endpoint. No authentication required.
 
-    `role` field in the request body determines supplier vs agent registration path.
-    On success returns HTTP 201 with `org_id` and `access_token` (JWT).
+    On success returns HTTP 201 with `org_id` and `access_token` (JWT bearer token).
 
     Error responses:
     - 409: duplicate email → `{"error": {"code": "duplicate_email", "message": "..."}}`
-    - 422: validation failure (invalid entity_type, missing fields, attestation=false)
-           → standard Pydantic 422 for schema errors; domain ValidationError for attestation
+    - 422: validation failure (invalid entity_type, missing fields, password < 12 chars)
+           → `{"error": {"code": "validation_error", "message": "..."}}`
     """
-    if isinstance(body, SupplierRegisterRequest):
-        result = await svc.register_supplier(
-            SupplierRegistrationInput(
-                name=body.name,
-                jurisdiction=body.jurisdiction,
-                entity_type=body.entity_type,
-                contact_email=body.contact_email,
-                password=body.password,
-            )
+    result = await svc.register_supplier(
+        SupplierRegistrationInput(
+            name=body.name,
+            jurisdiction=body.jurisdiction,
+            entity_type=body.entity_type,
+            contact_email=body.contact_email,
+            password=body.password,
         )
-    else:
-        # AgentRegisterRequest — attestation already validated by model_validator
-        result = await svc.register_agent(
-            AgentRegistrationInput(
-                name=body.name,
-                jurisdiction=body.jurisdiction,
-                entity_type=body.entity_type,
-                contact_email=body.contact_email,
-                password=body.password,
-                ops_contact_email=body.ops_contact_email,
-                regulatory_status_attested=body.regulatory_status_attested,
-            )
-        )
+    )
+    return OrgRegisterResponse(
+        org_id=result.org_id,
+        access_token=result.access_token,
+    )
 
+
+@router.post(
+    "/register/agent",
+    response_model=OrgRegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a new agent organization",
+)
+async def register_agent(
+    body: AgentRegisterRequest,
+    svc: OrgService = Depends(get_org_service),
+) -> OrgRegisterResponse:
+    """
+    Public endpoint. No authentication required.
+
+    `regulatory_status_attested` must be `true` — enforced in domain service.
+    `ops_contact_email` must differ from `contact_email` — enforced in domain service.
+
+    On success returns HTTP 201 with `org_id` and `access_token` (JWT bearer token).
+
+    Error responses:
+    - 409: duplicate email → `{"error": {"code": "duplicate_email", "message": "..."}}`
+    - 422: attestation false → `{"error": {"code": "attestation_required", "message": "..."}}`
+    - 422: ops/contact email collision → `{"error": {"code": "invalid_ops_email", "message": "..."}}`
+    - 422: other validation failure → `{"error": {"code": "validation_error", "message": "..."}}`
+    """
+    result = await svc.register_agent(
+        AgentRegistrationInput(
+            name=body.name,
+            jurisdiction=body.jurisdiction,
+            entity_type=body.entity_type,
+            contact_email=body.contact_email,
+            password=body.password,
+            ops_contact_email=body.ops_contact_email,
+            regulatory_status_attested=body.regulatory_status_attested,
+        )
+    )
     return OrgRegisterResponse(
         org_id=result.org_id,
         access_token=result.access_token,
@@ -1141,7 +1219,7 @@ async def get_my_org(
     )
 ```
 
-### 7.4 `POST /borrowers/invite` + `GET /borrowers/{id}` router (`app/api/routers/borrowers.py`)
+### 7.4 Borrowers router (`app/api/routers/borrowers.py`)
 
 ```python
 """Borrower management endpoints."""
@@ -1181,7 +1259,7 @@ async def invite_borrower(
     - 401: missing/invalid token
     - 403: caller is not an agent → `{"error": {"code": "forbidden", "message": "..."}}`
     - 409: contact_email already exists → `{"error": {"code": "duplicate_email", "message": "..."}}`
-    - 422: missing required fields
+    - 422: missing required fields → `{"error": {"code": "validation_error", "message": "..."}}`
     """
     result = await svc.invite_borrower(
         caller=caller,
@@ -1227,13 +1305,16 @@ async def get_borrower(
 
 ### 7.5 Error envelope reference for M1 endpoints
 
-All domain errors are mapped by the existing handler in `app/core/errors.py`. M1 adds no new handler registrations — the existing map covers all needed codes.
+All domain errors are mapped by the existing handler in `app/core/errors.py`. Pydantic validation errors are intercepted by the new `RequestValidationError` handler (§7.6) and reformatted to the same envelope. All 422 responses from M1 endpoints use `{"error": {"code": "...", "message": "..."}}`.
+
+> **`ConflictError` code override note:** `ConflictError` has class-level `code = "conflict"`. When instantiated with `ConflictError(..., code="duplicate_email")`, the `__init__` override sets `self.code = "duplicate_email"`. The envelope will show `"duplicate_email"` not `"conflict"`. This is the intended behaviour — the custom `code` kwarg overrides the class default.
 
 | Scenario | Exception raised | HTTP | Envelope |
 |---|---|---|---|
-| Duplicate `contact_email` on `/orgs/register` | `ConflictError("...", code="duplicate_email")` | 409 | `{"error": {"code": "duplicate_email", "message": "..."}}` |
-| Invalid `entity_type` (caught by Pydantic) | Pydantic `ValidationError` | 422 | FastAPI default 422 body |
-| `regulatory_status_attested=false` (domain) | `ValidationError("...", code="attestation_required")` | 422 | `{"error": {"code": "attestation_required", "message": "..."}}` |
+| Duplicate `contact_email` on `/orgs/register/*` | `ConflictError("...", code="duplicate_email")` | 409 | `{"error": {"code": "duplicate_email", "message": "..."}}` |
+| Invalid `entity_type` or missing field (Pydantic) | `RequestValidationError` → handler | 422 | `{"error": {"code": "validation_error", "message": "<field>: <msg>"}}` |
+| `regulatory_status_attested=false` | `ValidationError("...", code="attestation_required")` | 422 | `{"error": {"code": "attestation_required", "message": "..."}}` |
+| `ops_contact_email == contact_email` | `ValidationError("...", code="invalid_ops_email")` | 422 | `{"error": {"code": "invalid_ops_email", "message": "..."}}` |
 | `POST /borrowers/invite` with supplier JWT | `Forbidden(...)` | 403 | `{"error": {"code": "forbidden", "message": "..."}}` |
 | `GET /orgs/me` without token | `AuthError(...)` | 401 | `{"error": {"code": "unauthorized", "message": "..."}}` |
 | `GET /orgs/me` with no org_id in JWT | `Forbidden(...)` | 403 | `{"error": {"code": "forbidden", "message": "..."}}` |
@@ -1241,17 +1322,54 @@ All domain errors are mapped by the existing handler in `app/core/errors.py`. M1
 | `GET /borrowers/{id}` wrong org | `Forbidden(...)` | 403 | `{"error": {"code": "forbidden", "message": "..."}}` |
 | `GET /borrowers/{id}` not found | `NotFoundError(...)` | 404 | `{"error": {"code": "not_found", "message": "..."}}` |
 
-> **Pydantic 422 vs domain 422:** Pydantic `RequestValidationError` (from FastAPI's built-in handler) produces a different body format than our domain `ValidationError`. For `entity_type` out-of-range, Pydantic catches it before the handler runs, so the 422 body is FastAPI's standard format with `{"detail": [...]}`. For `attestation_required`, the `model_validator` raises `ValueError` which Pydantic wraps the same way. The domain `ValidationError` path (`code="attestation_required"`) is a belt-and-suspenders fallback in the service for callers that bypass the Pydantic model (e.g. internal service calls from tests). Implementation engineers should decide whether to standardize the 422 body format — this is flagged in §10.
+### 7.6 Global `RequestValidationError` handler (BLOCKER #3 / Decision 4 fix)
 
-### 7.6 Updated `app/api/deps.py`
+Add to `app/core/errors.py` (inside `register_exception_handlers`) and register in `app/main.py`:
 
-Add providers for `OrgService` and `BorrowerService`:
+```python
+# In app/core/errors.py — add to register_exception_handlers:
+
+from fastapi.exceptions import RequestValidationError
+
+def register_exception_handlers(app: FastAPI) -> None:
+    async def domain_error_handler(request: Request, exc: DomainError) -> JSONResponse:
+        status_code = next((s for t, s in _STATUS_MAP.items() if isinstance(exc, t)), 500)
+        return JSONResponse(
+            status_code=status_code,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    async def validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """Convert ALL Pydantic RequestValidationError 422s to the standard error envelope.
+        Uses the first error's location and message for the human-readable message.
+        """
+        first = exc.errors()[0]
+        loc = first.get("loc", ())
+        field = loc[-1] if loc else "unknown"
+        msg = first.get("msg", "validation error")
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "validation_error", "message": f"{field}: {msg}"}},
+        )
+
+    app.add_exception_handler(DomainError, domain_error_handler)        # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
+```
+
+> This handler ensures all 422 responses — whether from Pydantic field validation (e.g. `entity_type="banana"`, `password` too short, missing required field) or domain services — use the `{"error": {"code": "...", "message": "..."}}` envelope. It resolves the two-format 422 problem (Decision 4) and is required for M1.
+
+### 7.7 Updated `app/api/deps.py`
+
+Add providers for `OrgService` and `BorrowerService`. Update `UserRepository` import to new location:
 
 ```python
 # Add to existing app/api/deps.py:
 
 from app.repositories.org_repository import OrgRepository
 from app.repositories.borrower_repository import BorrowerRepository
+from app.repositories.user_repository import UserRepository   # moved from auth_service.py
 from app.services.org_service import OrgService
 from app.services.borrower_service import BorrowerService
 
@@ -1269,9 +1387,9 @@ def get_borrower_service(session: SessionDep) -> BorrowerService:
     )
 ```
 
-### 7.7 Updated `app/main.py`
+### 7.8 Updated `app/main.py`
 
-Register the new routers:
+Register the new routers and the exception handler is already registered via `register_exception_handlers`:
 
 ```python
 # In create_app(), add:
@@ -1302,9 +1420,9 @@ After M1 registration, **`org_id` is always set** in the JWT. The `register_supp
 2. Making it non-nullable now would break `POST /auth/login` for M0 seed users.
 3. The `GET /orgs/me` endpoint handles `org_id=None` gracefully by raising `Forbidden`.
 
-**M1 obligation (not fully resolved, flagged in §10):** a future migration may make `users.org_id NOT NULL` after all M0 seed users are migrated. Until then, `org_id` remains nullable in the DB and in `AuthUser`.
+**M2 hard gate — `users.org_id NOT NULL`:** At the start of M2, before any M2 migration is authored, a data-validation query must confirm zero rows have `org_id IS NULL` or `org_id NOT IN (SELECT id FROM organizations)`. If clean, migration `0005_users_org_id_not_null.py` sets `users.org_id NOT NULL`. At the same time, `AuthUser.org_id` becomes `UUID` (non-nullable) and `get_current_user` in `deps.py` must raise `AuthError` (401) for tokens with null `org_id` — these are pre-M1 tokens that are no longer valid. This gate and migration stub must be specced in the M2 spec.
 
-**No changes to `create_access_token` or `decode_access_token` signatures in M1.** The function already handles `org_id: str | None`. No migration of existing tokens is needed.
+**No changes to `create_access_token` or `decode_access_token` signatures in M1.**
 
 ### JWT claim summary (post-M1)
 
@@ -1326,7 +1444,7 @@ All M1 tests follow the M0 conftest pattern:
 - Transactional rollback per test against the `lendrail_test` database with `alembic upgrade head` applied once per session.
 - `db_session` fixture passed to service constructors directly (no HTTP for service-level tests).
 - `client` fixture (httpx `AsyncClient` + ASGITransport) for integration/router tests.
-- New fixtures needed:
+- New fixtures needed (all `async def` — required for `asyncio_mode=auto`):
 
 ```python
 @pytest.fixture
@@ -1334,7 +1452,8 @@ async def seed_org(db_session) -> Organization:
     """Insert a minimal Organization row for FK tests."""
     org = Organization(
         id=uuid.uuid4(), name="Test Org", jurisdiction="Delaware",
-        entity_type="fund", role="supplier", contact_email=f"org-{uuid.uuid4()}@example.com",
+        entity_type="fund", role="supplier",
+        contact_email=f"org-{uuid.uuid4()}@example.com",
         status="approved",
     )
     db_session.add(org)
@@ -1342,22 +1461,45 @@ async def seed_org(db_session) -> Organization:
     return org
 
 @pytest.fixture
-def supplier_headers(client, seed_org) -> dict:
+async def supplier_headers(client) -> dict:
     """Register a supplier and return Authorization headers."""
-    # Call POST /orgs/register synchronously in fixture setup via anyio.
-    ...
+    resp = await client.post("/orgs/register/supplier", json={
+        "name": "Test Supplier",
+        "jurisdiction": "Delaware, USA",
+        "entity_type": "fund",
+        "contact_email": f"supplier-{uuid.uuid4()}@example.com",
+        "password": "Str0ngP@ssword!1",  # 16 chars — satisfies min_length=12
+    })
+    assert resp.status_code == 201
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
 
 @pytest.fixture
-def agent_headers(client, seed_org) -> dict:
+async def agent_headers(client) -> dict:
     """Register an agent and return Authorization headers."""
-    ...
+    resp = await client.post("/orgs/register/agent", json={
+        "name": "Test Agent",
+        "jurisdiction": "Delaware, USA",
+        "entity_type": "fund",
+        "contact_email": f"agent-{uuid.uuid4()}@example.com",
+        "password": "Str0ngP@ssword!2",  # 16 chars — satisfies min_length=12
+        "ops_contact_email": f"ops-{uuid.uuid4()}@example.com",
+        "regulatory_status_attested": True,
+    })
+    assert resp.status_code == 201
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
 ```
+
+> All fixture functions are `async def` and use `await client.post(...)`. The draft's "synchronously in fixture setup via anyio" comment was incorrect in an `asyncio_mode=auto` context — it is removed.
+
+> **Password in test fixtures:** All test passwords use 12+ characters (e.g. `"Str0ngP@ssword!1"`). No test fixture may use 8–11 character passwords — they will fail the `min_length=12` Pydantic validation and return 422.
 
 ### F-011 test cases (`tests/test_orgs.py` — migration section)
 
 | Test | Description | Asserts |
 |---|---|---|
-| `test_0002_migration_applies` | Run alembic up through 0002 | `organizations` table exists; `org_role_enum`, `entity_type_enum`, `org_status_enum` types exist |
+| `test_0002_migration_applies` | Run alembic up through 0002 | `organizations` table exists; `org_role_enum`, `entity_type_enum`, `org_status_enum` types exist; `ops_contact_email` and `regulatory_status_attested` columns exist on `organizations` |
 | `test_0002_downgrade` | `downgrade -1` from 0002 | `organizations` table dropped; ENUMs dropped |
 | `test_org_role_enum_constraint` | Insert org with `role="invalid"` | DB raises `DataError` / `IntegrityError` |
 | `test_entity_type_enum_constraint` | Insert org with `entity_type="banana"` | DB raises `DataError` |
@@ -1367,25 +1509,27 @@ def agent_headers(client, seed_org) -> dict:
 
 | Test | Description | Asserts |
 |---|---|---|
-| `test_0003_migration_applies` | Run up through 0003 | `users.ops_contact_email` column exists; `fk_users_org_id_organizations` FK exists |
-| `test_0003_downgrade` | `downgrade -1` from 0003 | FK dropped; `ops_contact_email` and `regulatory_status_attested` columns dropped |
-| `test_hash_password_returns_bcrypt` | `hash_password("secret")` | Returns string starting with `$2b$` |
-| `test_verify_password_true` | `verify_password("secret", hash_password("secret"))` | Returns `True` |
-| `test_verify_password_false` | `verify_password("wrong", hash_password("secret"))` | Returns `False` |
-| `test_password_not_in_logs` | `hash_password("mysecret")` with log capture | `"mysecret"` never appears in any `LogRecord` |
+| `test_0003_migration_applies` | Run up through 0003 | `fk_users_org_id_organizations` FK exists on `users` |
+| `test_0003_data_scrub` | Before running 0003, insert user with fabricated non-null org_id; then run 0003 | User row is deleted; FK added without error |
+| `test_0003_downgrade` | `downgrade -1` from 0003 | FK dropped |
+| `test_hash_password_returns_bcrypt` | `hash_password("strongPassword1!")` | Returns string starting with `$2b$` |
+| `test_verify_password_true` | `verify_password("strongPassword1!", hash_password("strongPassword1!"))` | Returns `True` |
+| `test_verify_password_false` | `verify_password("wrong", hash_password("strongPassword1!"))` | Returns `False` |
+| `test_password_not_in_logs` | `hash_password("strongPassword1!")` with log capture | `"strongPassword1!"` never appears in any `LogRecord` |
 | `test_user_org_fk_enforced` | Insert user with non-existent `org_id` | DB raises `IntegrityError` (`fk_users_org_id_organizations`) |
-| `test_user_null_org_id_ok` | Insert user with `org_id=None` | Row inserted without error (M0 seed users still valid) |
+| `test_user_null_org_id_rejected_by_fk` | After 0003, attempt to insert user with `org_id=None` | Succeeds — FK allows NULL (scrub only removed rows with non-null orphaned org_id) |
 
 ### F-013 test cases (`tests/test_orgs.py`)
 
 | Test | Description | Asserts |
 |---|---|---|
-| `test_supplier_register_201` | `POST /orgs/register` valid supplier payload | HTTP 201; body has `org_id` (UUID) and `access_token` (non-empty string); `token_type="bearer"` |
+| `test_supplier_register_201` | `POST /orgs/register/supplier` valid supplier payload | HTTP 201; body has `org_id` (UUID) and `access_token` (non-empty string); `token_type="bearer"` |
 | `test_supplier_jwt_claims` | Decode token from registration | JWT `role="supplier"`, `org_id` matches returned `org_id`, `sub` is valid UUID |
 | `test_supplier_register_no_password_in_response` | Register and inspect full response body | `"password"` key absent; `"hashed_password"` absent |
 | `test_supplier_duplicate_email_409` | Register same email twice | Second call → HTTP 409; body `{"error": {"code": "duplicate_email", "message": "..."}}` |
-| `test_supplier_invalid_entity_type_422` | `entity_type="banana"` | HTTP 422 |
-| `test_supplier_short_password_422` | `password="abc"` (< 8 chars) | HTTP 422 |
+| `test_supplier_invalid_entity_type_422` | `entity_type="banana"` | HTTP 422; body `{"error": {"code": "validation_error", ...}}` |
+| `test_supplier_entity_type_agent_rejected_422` | `entity_type="agent"` | HTTP 422 — `"agent"` is not in public `EntityType` schema |
+| `test_supplier_short_password_422` | `password="short12"` (< 12 chars) | HTTP 422; body `{"error": {"code": "validation_error", ...}}` |
 | `test_supplier_missing_name_422` | Omit `name` field | HTTP 422 |
 | `test_supplier_then_get_me` | Register supplier; call `GET /orgs/me` with returned token | HTTP 200; response `role="supplier"`, `id` matches `org_id` from registration |
 | `test_supplier_org_row_created` | Register supplier; query `organizations` table directly | Row exists with correct `name`, `role="supplier"`, `status="approved"` |
@@ -1395,13 +1539,15 @@ def agent_headers(client, seed_org) -> dict:
 
 | Test | Description | Asserts |
 |---|---|---|
-| `test_agent_register_201` | `POST /orgs/register` valid agent payload | HTTP 201; `org_id` + `access_token` present |
+| `test_agent_register_201` | `POST /orgs/register/agent` valid agent payload | HTTP 201; `org_id` + `access_token` present |
 | `test_agent_jwt_role` | Decode returned token | `role="agent"` |
-| `test_agent_register_missing_ops_contact_422` | Omit `ops_contact_email` | HTTP 422 |
-| `test_agent_register_attestation_false_422` | `regulatory_status_attested=false` | HTTP 422 |
+| `test_agent_register_missing_ops_contact_422` | Omit `ops_contact_email` | HTTP 422; `{"error": {"code": "validation_error", ...}}` |
+| `test_agent_register_attestation_false_422` | `regulatory_status_attested=false` | HTTP 422; `{"error": {"code": "attestation_required", "message": "..."}}` |
+| `test_agent_ops_email_same_as_contact_422` | `ops_contact_email == contact_email` | HTTP 422; `{"error": {"code": "invalid_ops_email", "message": "..."}}` |
 | `test_agent_duplicate_email_409` | Same email twice | HTTP 409, `code="duplicate_email"` |
 | `test_agent_then_get_me` | Register agent; `GET /orgs/me` | HTTP 200; `role="agent"` |
-| `test_agent_ops_contact_stored` | Register agent; query `users` table | `ops_contact_email` matches request value; `regulatory_status_attested=true` |
+| `test_agent_ops_contact_stored` | Register agent; query `organizations` table | `ops_contact_email` matches request value; `regulatory_status_attested=true` on the org row |
+| `test_agent_short_password_422` | `password="shortpw1"` (< 12 chars) | HTTP 422 |
 
 ### F-017 test cases (`tests/test_borrowers.py`)
 
@@ -1424,12 +1570,12 @@ def agent_headers(client, seed_org) -> dict:
 | `test_invite_with_supplier_jwt_403` | Supplier JWT on `POST /borrowers/invite` | HTTP 403; `code="forbidden"` |
 | `test_invite_with_no_token_401` | No `Authorization` header | HTTP 401 |
 | `test_invite_duplicate_email_409` | Same email invited twice | HTTP 409; `code="duplicate_email"` |
-| `test_invite_notification_logged` | Call invite; capture logs | `caplog` contains log entry with `event="borrower_invited"` and `borrower_email=<the email>` |
+| `test_invite_notification_logged` | Call invite; capture logs | `caplog` contains log entry with `borrower_invited` and the borrower email |
 | `test_get_borrower_200` | Agent JWT; `GET /borrowers/{id}` (own borrower) | HTTP 200; response fields match created borrower |
 | `test_get_borrower_wrong_agent_403` | Different agent org's JWT; `GET /borrowers/{id}` | HTTP 403; `code="forbidden"` |
 | `test_get_borrower_not_found_404` | Valid agent JWT; random UUID | HTTP 404; `code="not_found"` |
 | `test_get_borrower_supplier_jwt_403` | Supplier JWT on `GET /borrowers/{id}` | HTTP 403 |
-| `test_get_borrower_no_password_in_response` | Call `GET /borrowers/{id}` | `"hashed_password"` and `"password"` absent from response (borrowers have no password, but assert defensively) |
+| `test_get_borrower_no_password_in_response` | Call `GET /borrowers/{id}` | `"hashed_password"` and `"password"` absent from response |
 
 ### F-019 test cases (`tests/test_orgs.py`)
 
@@ -1448,13 +1594,12 @@ def agent_headers(client, seed_org) -> dict:
 ```python
 async def test_supplier_full_flow(client):
     """Register supplier → JWT → GET /orgs/me → verify round-trip."""
-    reg = await client.post("/orgs/register", json={
-        "role": "supplier",
+    reg = await client.post("/orgs/register/supplier", json={
         "name": "Acme Fund",
         "jurisdiction": "Delaware, USA",
         "entity_type": "fund",
         "contact_email": "acme@example.com",
-        "password": "password123",
+        "password": "Acme@Str0ng!2026",  # 16 chars — satisfies min_length=12
     })
     assert reg.status_code == 201
     data = reg.json()
@@ -1472,26 +1617,42 @@ async def test_supplier_full_flow(client):
 
 ---
 
-## §10. Open decisions — flag for tech-lead review
+## §10. Open decisions — remaining items for future milestones
 
-1. **`org_id` non-nullable timeline.** `users.org_id` remains nullable in M1 to preserve M0 seed user compatibility. Tech lead should decide: (a) at what milestone `org_id` becomes `NOT NULL` in the DB, and (b) whether M0 seed users need a data migration to associate them with a seed org. Until resolved, `AuthUser.org_id` stays `UUID | None`.
+1. **`org_id` non-nullable timeline.** `users.org_id` remains nullable in M1. **M2 hard gate:** before any M2 migration is authored, confirm zero rows with orphaned `org_id`. Then add migration `0005_users_org_id_not_null.py` as the first M2 migration. `AuthUser.org_id` becomes `UUID` (non-nullable) at the same time; `get_current_user` must raise `AuthError` (401) for null `org_id` tokens.
 
-2. **`User.role` denormalization.** `role` lives on both `User` and `Organization` (and in the JWT). This simplifies JWT issuance but creates a potential sync issue if an admin changes an org's role. A cleaner model would derive the role from the org at login time. Recommend tech-lead decision before M2: keep denormalized (simpler, sufficient for MVP) or join to org at login (normalized, safe).
+2. **`User.role` denormalization.** Keep through MVP. `User.role` must equal `Organization.role` — no automated DB enforcement. Revisit before M4 (loan booking enforces agent role). If an admin can change org roles between M3 and M4, add a `role` refresh at login.
 
-3. **`ops_contact_email` placement.** Currently specced as a column on `users` (the first user of the org). An alternative is to put it on `organizations` directly as a separate non-login contact email. The `organizations` table in F-015 refers to "ops/settlement contact email" as a field for the org entity, not a person. If the org may have multiple users in future, storing it on the org is cleaner. The current placement on `user` is a simplification for MVP.
+3. **`status` column on `Organization` (F-058 pre-inclusion).** Approved as specced — added in migration 0002 to avoid a one-column migration. F-058 is M1 scope per the feature index. Admin endpoints that act on `status` are separate work.
 
-4. **Pydantic 422 body format inconsistency.** Pydantic schema errors return `{"detail": [...]}` (FastAPI default), while domain `ValidationError` returns `{"error": {"code": "...", "message": "..."}}`. This means two different 422 response shapes. Options: (a) add a custom `RequestValidationError` handler that reformats to the envelope, (b) accept two formats (simpler), (c) move all validation into domain services and return strings from Pydantic only. Recommend standardizing to envelope for API consistency — this requires one additional exception handler.
+4. **Auto-approval on registration.** Keep `status="approved"` for MVP. If the product team requires admin approval before JWT is useful, `OrgService.register_*` and an org-status middleware check must be added. Pre-launch checklist item.
 
-5. **`status` column on `Organization` (F-058 pre-inclusion).** `org_status_enum` and `status` column are added in migration 0002 ahead of F-058, which is also an M1 feature per the feature index. This is intentional to avoid a separate migration. If F-058 is deferred to a later milestone, the column can remain and the admin endpoints can be added later without a new migration.
+5. **`notifications.user_id` FK gap.** The `notifications` table has no FK from `user_id` to `users.id` (M0 design). A migration must add `REFERENCES users(id)` before F-048 (`GET /notifications`) is built. Flag in M2 scope.
 
-6. **`UserRepository` location.** Currently in `app/services/auth_service.py` (M0 decision). M1 adds a `repositories/` package for new repos. A follow-up cleanup should move `UserRepository` to `app/repositories/user_repository.py` for consistency. Not blocking M1.
+6. **Email enumeration on public registration endpoints.** `POST /orgs/register/supplier` and `POST /orgs/register/agent` return 409 on duplicate email — inherent to registration flows. Rate limiting is a pre-launch production-hardening task (not M1 scope).
 
-7. **Password minimum length.** The spec uses 8 characters (`min_length=8`). NIST SP 800-63B recommends a minimum of 8 characters. Tech lead should confirm this is acceptable or raise to a higher minimum (12+ is common for B2B SaaS).
+7. **`op.get_bind()` deprecation.** Used in migrations for ENUM `.create()` calls. Safe in the current `run_sync` Alembic context. Will require migration to the async-compatible API when upgrading to Alembic 2.x.
 
-8. **Agent `entity_type` allowed values.** The `entity_type_enum` includes `"agent"` as a value (from ARCHITECTURE.md data model). For agent orgs registering via `POST /orgs/register?role=agent`, is `entity_type="agent"` a valid value, or is it reserved for internal use? Currently the Pydantic schema allows it. Clarification needed.
-
-9. **Auto-approval on registration.** `OrgService.register_supplier` and `register_agent` set `status="approved"` immediately. F-058 provides manual override. If the product team wants all registrations to start as `pending_review` and require admin approval before the JWT is useful, the registration flow must change (e.g. return a JWT but block protected endpoints for `pending_review` orgs). This is a product decision — flagged for review.
+8. **`agent` value in `entity_type_enum` DB ENUM.** The DB ENUM retains `"agent"`. The public Pydantic schema excludes it. If future internal tooling needs to set `entity_type="agent"` for admin-created orgs, this will be handled via an internal endpoint with a broader schema — not the public registration endpoints.
 
 ---
 
-Status: Draft — awaiting tech-lead review
+## §11. Resolution log
+
+This table records every review finding and the action taken. Engineers reading this spec do not need the review document — all changes are reflected in the spec above.
+
+| # | Severity | Finding summary | Resolution |
+|---|---|---|---|
+| 1 | BLOCKER | Discriminated union breaks FastAPI ≤0.115 OpenAPI schema generation | **Fixed.** Removed discriminated union and shared `POST /orgs/register` endpoint entirely. Split into `POST /orgs/register/supplier` (§7.3) and `POST /orgs/register/agent` (§7.3), each with its own typed Pydantic model. `OrgRegisterRequest` union type removed from `app/schemas/orgs.py`. All acceptance criteria references updated. |
+| 2 | BLOCKER | Migration 0003 FK creation fails if seed users have non-NULL orphaned `org_id` | **Fixed.** Migration 0003 `upgrade()` now: (1) `DELETE FROM users WHERE org_id IS NULL OR org_id NOT IN (SELECT id FROM organizations)`, (2) adds FK with `NOT VALID`, (3) validates with `ALTER TABLE users VALIDATE CONSTRAINT`. Documented in migration docstring (§3.3). |
+| 3 | BLOCKER | `regulatory_status_attested=false` produces wrong 422 envelope via `model_validator` | **Fixed.** Removed `model_validator` from `AgentRegisterRequest`. Attestation check moved to `OrgService.register_agent`, which raises `ValidationError(code="attestation_required")`. This routes through the domain exception handler to the correct `{"error": {...}}` envelope. Additionally, a global `RequestValidationError` handler is added to `app/core/errors.py` (§7.6) that standardizes all Pydantic 422s to the same envelope (Decision 4). |
+| 4 | BLOCKER | `ops_contact_email == contact_email` self-collision not guarded | **Fixed.** `OrgService.register_agent` checks `ops_contact_email == contact_email` before any DB writes and raises `ValidationError(code="invalid_ops_email", message="Ops contact email must differ from primary contact email")`. Returns 422 with correct envelope. New test case `test_agent_ops_email_same_as_contact_422` added (§9). |
+| 5 | MAJOR | `supplier_headers`/`agent_headers` fixtures declared sync but must be async | **Fixed.** Both fixtures are `async def` with `await client.post(...)`. The incorrect "synchronously via anyio" comment removed. Fixture code in §9 updated. Updated endpoint paths to `/orgs/register/supplier` and `/orgs/register/agent`. |
+| 6 | MAJOR | `server_default="false"` inconsistency; `User` model must be fully replaced | **Fixed.** (a) `regulatory_status_attested` uses `server_default=sa.text("false")` in both the `Organization` model (§4.1) and migration 0002 (§3.2). (b) Explicit note added in §4.2: "IMPORTANT: This is a full file replacement, not a patch." |
+| 7 | MAJOR | `notifications.user_id` has no FK to `users` — latent integrity gap | **Documented.** Note added in §0 (M0 baseline audit table) and §6.2 (`BorrowerService`): `notifications.user_id` has no FK to `users` by M0 design. Migration must add `REFERENCES users(id)` before F-048. Flagged in §10 item 5. |
+| 8 | MAJOR | Email enumeration surface on public registration endpoints not documented | **Documented.** Note added to §0 guiding principles and §10 item 6. Rate limiting flagged as pre-launch hardening. |
+| Decision 3 (MAJOR) | MAJOR | `ops_contact_email` belongs on `Organization`, not `User` | **Applied.** `ops_contact_email` and `regulatory_status_attested` moved to `organizations` table in migration 0002 (§3.2). Removed from migration 0003. `Organization` ORM model updated (§4.1). `User` ORM model no longer has these columns (§4.2). `OrgService.register_agent` passes both fields to `orgs.create(...)` not `users.create_user(...)` (§6.1). `UserRepository.create_user` signature simplified (§5.1). Test case updated to query `organizations` table for `ops_contact_email` and `regulatory_status_attested` (§9). |
+| Decision 6 (MAJOR) | MAJOR | `UserRepository` must be in `repositories/` in M1, not deferred | **Applied.** `UserRepository` moved to `app/repositories/user_repository.py` (§5.1). `auth_service.py` and `deps.py` import from new location. Directory tree updated (§2). |
+| Decision 7 (MAJOR) | MAJOR | Password minimum length raised to 12 characters | **Applied.** `min_length=12` in `SupplierRegisterRequest` and `AgentRegisterRequest` (§7.1). All test fixture passwords updated to 12+ characters (e.g. `"Str0ngP@ssword!1"`). Integration flow test updated. Test cases for short password updated to note 12-char threshold. |
+| Decision 8 (MAJOR) | MAJOR | `"agent"` must be removed from `EntityType` public Pydantic schema | **Applied.** `EntityType = Literal["fund", "corporate_treasury", "foundation"]` in `app/schemas/orgs.py` (§7.1). DB `entity_type_enum` retains `"agent"` value. New test `test_supplier_entity_type_agent_rejected_422` added. Note added in §3.1 and §7.1 explaining the split. |
+| Decision 13 (MAJOR) | MAJOR | `structlog` vs stdlib `logging` inconsistency | **Resolved.** M1 uses stdlib `logging.getLogger` throughout, consistent with M0 implementation. `structlog` mandate removed from §0 guiding principles. All M1 service code snippets use `logging.getLogger`. |
