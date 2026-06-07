@@ -4,16 +4,7 @@ Raises typed DomainError subclasses that the API layer maps to HTTP responses.
 """
 from app.core.errors import AuthError
 from app.core.security import create_access_token, verify_password_safe
-from app.db.repository import BaseRepository
-from app.models.user import User
-
-
-class UserRepository(BaseRepository[User]):
-    model = User
-
-    async def get_by_email(self, email: str) -> User | None:
-        rows = await self.list_where(User.email == email)
-        return rows[0] if rows else None
+from app.repositories.user_repository import UserRepository  # moved in M1 (Decision 6)
 
 
 class AuthService:

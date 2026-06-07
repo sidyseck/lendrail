@@ -22,7 +22,12 @@ from app.notifications.repository import NotificationRepository
 from app.schemas.auth import AuthUser
 from app.secrets.env_store import EnvSecretStore
 from app.secrets.interface import SecretStore
-from app.services.auth_service import AuthService, UserRepository
+from app.repositories.user_repository import UserRepository  # moved in M1 (Decision 6)
+from app.repositories.org_repository import OrgRepository
+from app.repositories.borrower_repository import BorrowerRepository
+from app.services.auth_service import AuthService
+from app.services.org_service import OrgService
+from app.services.borrower_service import BorrowerService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -73,3 +78,24 @@ def get_secret_store() -> SecretStore:
 
 def get_notification_service(session: SessionDep) -> NotificationService:
     return ConsoleNotificationAdapter(NotificationRepository(session))
+
+
+# ---- org service ----
+
+
+def get_org_service(session: SessionDep) -> OrgService:
+    return OrgService(
+        orgs=OrgRepository(session),
+        users=UserRepository(session),
+    )
+
+
+# ---- borrower service ----
+
+
+def get_borrower_service(session: SessionDep) -> BorrowerService:
+    notifier = ConsoleNotificationAdapter(NotificationRepository(session))
+    return BorrowerService(
+        borrowers=BorrowerRepository(session),
+        notifier=notifier,
+    )

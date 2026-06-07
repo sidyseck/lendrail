@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
@@ -61,4 +62,20 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={"error": {"code": exc.code, "message": exc.message}},
         )
 
+    async def validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """Convert ALL Pydantic RequestValidationError 422s to the standard error envelope.
+        Uses the first error's location and message for the human-readable message.
+        """
+        first = exc.errors()[0]
+        loc = first.get("loc", ())
+        field = loc[-1] if loc else "unknown"
+        msg = first.get("msg", "validation error")
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "validation_error", "message": f"{field}: {msg}"}},
+        )
+
     app.add_exception_handler(DomainError, handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
