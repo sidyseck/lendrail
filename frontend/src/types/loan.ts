@@ -38,6 +38,24 @@ export interface LoanListResponse {
   loans: Loan[];
 }
 
+export interface LoanBookingRequest {
+  connection_id: string;
+  borrower_id: string;
+  asset_type: string;
+  quantity: string;
+  rate_bps: number;
+  term_type: 'open' | 'fixed';
+  maturity_date: string | null;
+  collateral_type: string;
+  collateral_quantity: string;
+  collateral_value_usd: string;
+}
+
+export interface LoanCreateResponse {
+  loan_id: string;
+  state: LoanState;
+}
+
 export interface CollateralSubstitutionRequest {
   collateral_type: string;
   collateral_quantity: string;
