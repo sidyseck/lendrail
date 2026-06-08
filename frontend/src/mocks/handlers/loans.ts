@@ -2,6 +2,8 @@ import { delay, http, HttpResponse } from 'msw';
 import { mockError } from '../helpers';
 import type { Loan, LoanBookingRequest, LoanListResponse } from '@/types/loan';
 
+const MOCK_PRICES: Record<string, string> = { BTC: '63500.00', ETH: '1700.00' };
+
 let mockLoans: Loan[] = [];
 
 export function resetMockLoans(): void {
@@ -9,6 +11,16 @@ export function resetMockLoans(): void {
 }
 
 export const loanHandlers = [
+  http.get('/api/market-data/prices/:assetType', ({ params }) => {
+    const assetType = params.assetType as string;
+    const price = MOCK_PRICES[assetType] ?? '0.00';
+    return HttpResponse.json({
+      asset_type: assetType,
+      price_usd: price,
+      as_of: new Date().toISOString(),
+    });
+  }),
+
   http.post('/api/loans', async ({ request }) => {
     await delay(20);
     const body = (await request.json().catch(() => null)) as LoanBookingRequest | null;

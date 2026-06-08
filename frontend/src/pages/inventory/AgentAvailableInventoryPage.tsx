@@ -3,12 +3,14 @@
 import { useEffect } from 'react';
 import { useAgentInventory } from '@/hooks/useAgentInventory';
 import { useAllocationNotifications } from '@/hooks/useAllocationNotifications';
+import { usePriceStream } from '@/hooks/usePriceStream';
 import { AggregatedInventorySection } from './AggregatedInventorySection';
 import { SupplierBreakdownSection } from './SupplierBreakdownSection';
 
 export function AgentAvailableInventoryPage() {
   const inventory = useAgentInventory();
   const notifications = useAllocationNotifications(true);
+  const prices = usePriceStream();
 
   useEffect(() => {
     void notifications.onScreenVisit();
@@ -28,6 +30,7 @@ export function AgentAvailableInventoryPage() {
         aggregated={inventory.aggregated}
         isLoading={inventory.isLoading}
         error={inventory.error}
+        prices={prices}
       />
 
       <SupplierBreakdownSection

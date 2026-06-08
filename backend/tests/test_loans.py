@@ -236,8 +236,10 @@ async def test_create_borrower_with_connection_enables_supplier_visibility_and_b
             "term_type": "open",
             "maturity_date": None,
             "collateral_type": "CASH_USD",
-            "collateral_quantity": "15000",
-            "collateral_value_usd": "15000",
+            # collateral_value = quantity * price * ltv = 0.5 * 65000 * 0.70 = 22750
+            # Using the consistent value so the service derives booking_ltv_pct = 70.0
+            "collateral_quantity": "22750",
+            "collateral_value_usd": "22750",
         },
         headers=m4_setup["agent"]["headers"],
     )
@@ -403,7 +405,7 @@ async def test_market_price_endpoint_returns_default_price(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["asset_type"] == "BTC"
-    assert body["price_usd"] == "65000.0"
+    assert body["price_usd"] == "63500.0"
     assert body["as_of"]
 
 

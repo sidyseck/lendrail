@@ -14,7 +14,15 @@
       "Bash(uv --version)",
       "Bash(xargs ls)",
       "Bash(python -m pytest backend/tests/test_connections.py -x -q)",
-      "Bash(python3 -m pytest backend/tests/test_connections.py -x -q)"
+      "Bash(python3 -m pytest backend/tests/test_connections.py -x -q)",
+      "Bash(python -m pytest tests/test_adapters.py -x -q)",
+      "Bash(python3 -m pytest tests/test_adapters.py -x -q)",
+      "Bash(find /Users/sidyseck -name \"pytest\" -type f 2>/dev/null | head -5 && ls /Users/sidyseck/github/lendrail-1/restart.sh)",
+      "Read(//Users/sidyseck/**)",
+      "Bash(git stash *)",
+      "Bash(kill %1)",
+      "Bash(git -C /Users/sidyseck/github/lendrail-1 log --oneline -5 -- backend/tests/test_loans.py)",
+      "Bash(git -C /Users/sidyseck/github/lendrail-1 show 5a058d7 -- backend/tests/test_loans.py)"
     ]
   }
 }

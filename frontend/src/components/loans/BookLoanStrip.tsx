@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { listApprovedBorrowers } from '@/api/borrowerApi';
 import { bookLoan } from '@/api/loanApi';
 import { useAgentInventory } from '@/hooks/useAgentInventory';
+import { usePriceStream } from '@/hooks/usePriceStream';
 import type { ApprovedBorrower } from '@/types/borrower';
 import type { LoanBookingRequest } from '@/types/loan';
 
@@ -15,6 +16,10 @@ interface Props {
 interface FormValues {
   borrower_id: string;
   quantity: string;
+  asset_price_usd: string;
+  booking_ltv_pct: string;
+  margin_call_ltv_pct: string;
+  liquidation_ltv_pct: string;
   rate_bps: string;
   term_type: TermType;
   maturity_date: string;
@@ -26,6 +31,10 @@ interface FormValues {
 const EMPTY_FORM: FormValues = {
   borrower_id: '',
   quantity: '',
+  asset_price_usd: '',
+  booking_ltv_pct: '',
+  margin_call_ltv_pct: '',
+  liquidation_ltv_pct: '',
   rate_bps: '',
   term_type: 'open',
   maturity_date: '',
@@ -37,6 +46,7 @@ const EMPTY_FORM: FormValues = {
 export function BookLoanStrip({ onBooked }: Props) {
   const [searchParams, setSearchParams] = useSearchParams();
   const inventory = useAgentInventory();
+  const prices = usePriceStream();
   const [selectedKey, setSelectedKey] = useState('');
   const [borrowers, setBorrowers] = useState<ApprovedBorrower[]>([]);
   const [borrowersLoading, setBorrowersLoading] = useState(false);
@@ -65,6 +75,15 @@ export function BookLoanStrip({ onBooked }: Props) {
       setSelectedKey(`${first.connection_id}:${first.asset_type}`);
     }
   }, [rows, searchParams, selected]);
+
+  // Pre-populate asset price when selection or live prices change
+  useEffect(() => {
+    if (!selected) return;
+    const p = prices[selected.asset_type];
+    if (p !== undefined) {
+      setValues((current) => ({ ...current, asset_price_usd: p.toFixed(2) }));
+    }
+  }, [selected?.asset_type, prices]);
 
   useEffect(() => {
     if (!selected) {
@@ -116,6 +135,10 @@ export function BookLoanStrip({ onBooked }: Props) {
         borrower_id: values.borrower_id,
         asset_type: selected.asset_type,
         quantity: values.quantity,
+        asset_price_usd: values.asset_price_usd,
+        booking_ltv_pct: values.booking_ltv_pct,
+        margin_call_ltv_pct: values.margin_call_ltv_pct,
+        liquidation_ltv_pct: values.liquidation_ltv_pct,
         rate_bps: Number(values.rate_bps),
         term_type: values.term_type,
         maturity_date: values.term_type === 'fixed' ? values.maturity_date : null,
@@ -162,7 +185,8 @@ export function BookLoanStrip({ onBooked }: Props) {
       {success && <p className="mb-3 text-sm text-green-700">{success}</p>}
 
       <form onSubmit={handleSubmit} className="grid gap-3 lg:grid-cols-12">
-        <label className="lg:col-span-3">
+        {/* Row 1: Inventory, Borrower, Quantity, Price, LTV group */}
+        <label className="lg:col-span-2">
           <span className="sr-only">Supplier inventory</span>
           <select
             value={selectedKey}
@@ -210,6 +234,56 @@ export function BookLoanStrip({ onBooked }: Props) {
           />
         </label>
 
+        {/* Price / LTV / Collateral calculation group */}
+        <label className="lg:col-span-2">
+          <span className="sr-only">Asset Price USD</span>
+          <input
+            required
+            aria-label="Asset Price USD"
+            placeholder="Price USD"
+            value={values.asset_price_usd}
+            onChange={(event) => updateValue('asset_price_usd', event.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </label>
+
+        <label className="lg:col-span-1">
+          <span className="sr-only">Booking LTV %</span>
+          <input
+            required
+            aria-label="Booking LTV %"
+            placeholder="LTV %"
+            value={values.booking_ltv_pct}
+            onChange={(event) => updateValue('booking_ltv_pct', event.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </label>
+
+        <label className="lg:col-span-1">
+          <span className="sr-only">Margin Call LTV %</span>
+          <input
+            required
+            aria-label="Margin Call LTV %"
+            placeholder="MC %"
+            value={values.margin_call_ltv_pct}
+            onChange={(event) => updateValue('margin_call_ltv_pct', event.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </label>
+
+        <label className="lg:col-span-1">
+          <span className="sr-only">Liquidation LTV %</span>
+          <input
+            required
+            aria-label="Liquidation LTV %"
+            placeholder="Liq %"
+            value={values.liquidation_ltv_pct}
+            onChange={(event) => updateValue('liquidation_ltv_pct', event.target.value)}
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+          />
+        </label>
+
+        {/* Row 2: Rate, Term, Maturity, Collateral */}
         <label className="lg:col-span-1">
           <span className="sr-only">Rate BPS</span>
           <input

@@ -27,7 +27,10 @@ class Settings(BaseSettings):
     # --- Adapter selection ---
     custodian_adapter: str = "mock"
     market_data_adapter: str = "mock"
-    mock_btc_price_usd: float = 65000.0  # fixed price for MockMarketDataAdapter
+    mock_btc_base_price_usd: float = 63_500.0
+    mock_eth_base_price_usd: float = 1_700.0
+    price_max_deviation_pct: float = 2.0
+    price_update_interval_seconds: float = 1.0
 
     # --- Notifications ---
     notification_adapter: Literal["console"] = "console"

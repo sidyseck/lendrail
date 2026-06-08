@@ -43,6 +43,12 @@ describe('LoanListPage', () => {
     );
     await user.selectOptions(screen.getByLabelText(/approved borrower/i), 'borrower-001');
     await user.type(screen.getByLabelText(/^quantity$/i), '0.50');
+    // Clear and re-type the price field (may be auto-populated or empty)
+    await user.clear(screen.getByLabelText(/asset price usd/i));
+    await user.type(screen.getByLabelText(/asset price usd/i), '63500');
+    await user.type(screen.getByLabelText(/booking ltv/i), '80');
+    await user.type(screen.getByLabelText(/margin call ltv/i), '90');
+    await user.type(screen.getByLabelText(/liquidation ltv/i), '95');
     await user.type(screen.getByLabelText(/rate bps/i), '500');
     await user.type(screen.getByLabelText(/collateral quantity/i), '15000');
     await user.type(screen.getByLabelText(/collateral value usd/i), '15000');

@@ -1,11 +1,15 @@
 """Loan lifecycle endpoints — M4."""
+import asyncio
+import json
 import uuid
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import StreamingResponse
 
 from app.adapters.interfaces import MarketDataAdapter
-from app.api.deps import get_current_user, get_loan_service, get_market_data_adapter
+from app.adapters.price_simulator import PriceCache
+from app.api.deps import get_current_user, get_current_user_sse, get_loan_service, get_market_data_adapter, get_price_cache_dep
 from app.api.rbac import require_role
 from app.schemas.auth import AuthUser
 from app.schemas.loans import (
@@ -149,6 +153,41 @@ async def book_loan(
         ),
     )
     return LoanCreateResponse(loan_id=result.id, state=result.state)
+
+
+@router.get("/market-data/prices/stream")
+async def stream_prices(
+    caller: AuthUser = Depends(get_current_user_sse),
+    price_cache: PriceCache = Depends(get_price_cache_dep),
+    max_events: int | None = Query(default=None, include_in_schema=False),
+) -> StreamingResponse:
+    """SSE — emits a JSON price snapshot every second. EventSource passes token via ?token=.
+
+    Must be registered BEFORE the /{asset_type} route so FastAPI does not absorb
+    the literal path segment 'stream' as a path parameter.
+
+    max_events: test-only escape hatch; httpx ASGITransport buffers the entire body
+    before returning so an infinite generator hangs the test. Pass max_events=1 to
+    produce a finite stream that ASGI transport can collect.
+    """
+    if caller.role not in ("supplier", "agent"):
+        from app.core.errors import Forbidden
+        raise Forbidden("Only suppliers and agents can stream market prices")
+
+    async def event_generator():
+        count = 0
+        while max_events is None or count < max_events:
+            data = json.dumps(price_cache.all())
+            yield f"data: {data}\n\n"
+            count += 1
+            if max_events is None or count < max_events:
+                await asyncio.sleep(1)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/market-data/prices/{asset_type}", response_model=MarketPriceResponse)

@@ -43,6 +43,10 @@ export interface LoanBookingRequest {
   borrower_id: string;
   asset_type: string;
   quantity: string;
+  asset_price_usd: string;
+  booking_ltv_pct: string;
+  margin_call_ltv_pct: string;
+  liquidation_ltv_pct: string;
   rate_bps: number;
   term_type: 'open' | 'fixed';
   maturity_date: string | null;

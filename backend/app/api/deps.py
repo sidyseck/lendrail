@@ -7,11 +7,12 @@ repository deps — services themselves never call Depends.
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Query
 from jwt import PyJWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.interfaces import CustodianAdapter, MarketDataAdapter
+from app.adapters.price_simulator import PriceCache, get_price_cache
 from app.adapters.providers import build_custodian_adapter, build_market_data_adapter
 from app.core.errors import AuthError
 from app.core.security import decode_access_token
@@ -42,22 +43,41 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 # ---- auth ----
 
 
-async def get_current_user(authorization: str = Header(default="")) -> AuthUser:
-    if not authorization.lower().startswith("bearer "):
-        raise AuthError("missing_bearer_token")
-    token = authorization.split(" ", 1)[1]
+def _resolve_auth_user(raw_token: str) -> AuthUser:
     try:
-        claims = decode_access_token(token)
+        claims = decode_access_token(raw_token)
     except PyJWTError:
         raise AuthError("invalid_token")
     raw_org_id = claims.get("org_id")
     if not raw_org_id:
-        raise AuthError("Pre-M1 token; org_id is missing", code="token_missing_org_id")   # Pre-M1 token; reject cleanly.
+        raise AuthError("Pre-M1 token; org_id is missing", code="token_missing_org_id")
     return AuthUser(
         user_id=UUID(claims["sub"]),
         org_id=UUID(raw_org_id),
         role=claims["role"],
     )
+
+
+async def get_current_user(authorization: str = Header(default="")) -> AuthUser:
+    if not authorization.lower().startswith("bearer "):
+        raise AuthError("missing_bearer_token")
+    return _resolve_auth_user(authorization.split(" ", 1)[1])
+
+
+async def get_current_user_sse(
+    authorization: str = Header(default=""),
+    token: str | None = Query(default=None),
+) -> AuthUser:
+    """Variant for SSE endpoints. EventSource cannot set headers, so accepts ?token= as fallback."""
+    if authorization.lower().startswith("bearer "):
+        return _resolve_auth_user(authorization.split(" ", 1)[1])
+    if token:
+        return _resolve_auth_user(token)
+    raise AuthError("missing_bearer_token")
+
+
+def get_price_cache_dep() -> PriceCache:
+    return get_price_cache()
 
 
 def get_auth_service(session: SessionDep) -> AuthService:

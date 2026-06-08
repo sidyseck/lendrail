@@ -1,17 +1,24 @@
 // src/pages/inventory/AggregatedInventorySection.tsx — F-063 Section A
-//
-// Shows total effective_available per asset type, summed across all active connections.
-// "On loan" column omitted (per OD-1): the agent JWT response does not include already_booked.
 
 import type { AggregatedAssetRow } from '@/types/inventory';
+import type { PriceMap } from '@/hooks/usePriceStream';
 
 interface Props {
   aggregated: AggregatedAssetRow[];
   isLoading: boolean;
   error: string | null;
+  prices: PriceMap;
 }
 
-export function AggregatedInventorySection({ aggregated, isLoading, error }: Props) {
+function formatUsd(qty: string, prices: PriceMap, assetType: string): string {
+  const price = prices[assetType];
+  if (price === undefined) return '—';
+  const usd = parseFloat(qty) * price;
+  if (!isFinite(usd)) return '—';
+  return '$' + usd.toLocaleString('en-US', { maximumFractionDigits: 0 });
+}
+
+export function AggregatedInventorySection({ aggregated, isLoading, error, prices }: Props) {
   return (
     <section aria-labelledby="aggregated-inventory-heading">
       <h2
@@ -45,14 +52,18 @@ export function AggregatedInventorySection({ aggregated, isLoading, error }: Pro
             <thead>
               <tr className="border-b border-gray-200">
                 <th className="py-2 pr-4 text-left font-medium text-gray-600">Asset type</th>
-                <th className="py-2 text-left font-medium text-gray-600">Total available</th>
+                <th className="py-2 pr-4 text-left font-medium text-gray-600">Total available</th>
+                <th className="py-2 text-left font-medium text-gray-600">USD value</th>
               </tr>
             </thead>
             <tbody>
               {aggregated.map((row) => (
                 <tr key={row.asset_type} className="border-b border-gray-100">
                   <td className="py-3 pr-4 font-semibold text-gray-700">{row.asset_type}</td>
-                  <td className="py-3 font-mono text-sm text-gray-700">{row.total_available}</td>
+                  <td className="py-3 pr-4 font-mono text-sm text-gray-700">{row.total_available}</td>
+                  <td className="py-3 font-mono text-sm text-gray-500">
+                    {formatUsd(row.total_available, prices, row.asset_type)}
+                  </td>
                 </tr>
               ))}
             </tbody>

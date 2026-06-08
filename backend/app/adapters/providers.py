@@ -17,7 +17,8 @@ def build_custodian_adapter() -> CustodianAdapter:
 
 
 def build_market_data_adapter() -> MarketDataAdapter:
+    from app.adapters.price_simulator import get_price_cache
     name = get_settings().market_data_adapter
     if name == "mock":
-        return MockMarketDataAdapter()
+        return MockMarketDataAdapter(cache=get_price_cache())
     raise NotImplementedError(f"market data adapter '{name}' not wired yet")
