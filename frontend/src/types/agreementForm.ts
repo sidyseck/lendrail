@@ -5,6 +5,7 @@ export type AgreementTermsField =
   | 'eligible_collateral'
   | 'initial_ltv_pct'
   | 'margin_call_ltv_pct'
+  | 'liquidation_ltv_pct'
   | 'recall_notice_days'
   | 'max_loan_days'
   | 'day_count_basis'
@@ -15,6 +16,7 @@ export interface AgreementTermsFormState {
   eligible_collateral: string;   // comma-separated → split to string[] on submit
   initial_ltv_pct: string;       // numeric string
   margin_call_ltv_pct: string;   // numeric string
+  liquidation_ltv_pct: string;   // numeric string
   recall_notice_days: string;    // numeric string
   max_loan_days: string;         // numeric string
   day_count_basis: 'actual_360' | 'actual_365' | '';

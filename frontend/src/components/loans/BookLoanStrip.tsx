@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { listApprovedBorrowers } from '@/api/borrowerApi';
 import { bookLoan } from '@/api/loanApi';
@@ -55,6 +55,9 @@ export function BookLoanStrip({ onBooked }: Props) {
   const [success, setSuccess] = useState<string | null>(null);
   const [isBooking, setIsBooking] = useState(false);
 
+  const latestPrices = useRef(prices);
+  latestPrices.current = prices;
+
   const rows = inventory.breakdown;
   const selected = useMemo(
     () => rows.find((row) => `${row.connection_id}:${row.asset_type}` === selectedKey) ?? null,
@@ -76,14 +79,14 @@ export function BookLoanStrip({ onBooked }: Props) {
     }
   }, [rows, searchParams, selected]);
 
-  // Pre-populate asset price when selection or live prices change
+  // Snapshot the price once when the selected asset changes — does not re-run on live price ticks
   useEffect(() => {
     if (!selected) return;
-    const p = prices[selected.asset_type];
+    const p = latestPrices.current[selected.asset_type];
     if (p !== undefined) {
       setValues((current) => ({ ...current, asset_price_usd: p.toFixed(2) }));
     }
-  }, [selected?.asset_type, prices]);
+  }, [selected?.asset_type]);
 
   useEffect(() => {
     if (!selected) {

@@ -40,6 +40,10 @@ export function AgreementReadOnlyCard({ agreement }: AgreementReadOnlyCardProps)
           <dd className="text-gray-900">{agreement.margin_call_ltv_pct}</dd>
         </div>
         <div>
+          <dt className="font-medium text-gray-600">Liquidation LTV %</dt>
+          <dd className="text-gray-900">{agreement.liquidation_ltv_pct}</dd>
+        </div>
+        <div>
           <dt className="font-medium text-gray-600">Recall Notice (days)</dt>
           <dd className="text-gray-900">{agreement.recall_notice_days}</dd>
         </div>

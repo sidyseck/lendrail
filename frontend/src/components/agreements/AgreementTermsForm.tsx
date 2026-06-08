@@ -7,6 +7,7 @@ import {
   validateEligibleCollateral,
   validateLtvPct,
   validateMarginCallLtv,
+  validateLiquidationLtv,
   validatePositiveInt,
   validateDayCountBasis,
 } from '@/lib/agreementValidators';
@@ -23,6 +24,7 @@ const EMPTY_STATE: AgreementTermsFormState = {
   eligible_collateral: '',
   initial_ltv_pct: '',
   margin_call_ltv_pct: '',
+  liquidation_ltv_pct: '',
   recall_notice_days: '',
   max_loan_days: '',
   day_count_basis: '',
@@ -64,6 +66,14 @@ export function AgreementTermsForm({
       // Cross-field validation only when individual field is valid
       const crossErr = validateMarginCallLtv(values.margin_call_ltv_pct, values.initial_ltv_pct);
       if (crossErr) errors.margin_call_ltv_pct = crossErr;
+    }
+
+    const liquidationLtvErr = validateLtvPct(values.liquidation_ltv_pct, 'Liquidation LTV %');
+    if (liquidationLtvErr) {
+      errors.liquidation_ltv_pct = liquidationLtvErr;
+    } else {
+      const crossErr = validateLiquidationLtv(values.liquidation_ltv_pct, values.margin_call_ltv_pct);
+      if (crossErr) errors.liquidation_ltv_pct = crossErr;
     }
 
     const recallErr = validatePositiveInt(values.recall_notice_days, 'Recall Notice (days)', 1);
@@ -183,6 +193,31 @@ export function AgreementTermsForm({
         {fieldErrors.margin_call_ltv_pct && (
           <p role="alert" className="text-sm text-red-600 mt-1">
             {fieldErrors.margin_call_ltv_pct}
+          </p>
+        )}
+      </div>
+
+      {/* Liquidation LTV % */}
+      <div className="mb-4">
+        <label
+          htmlFor="liquidation_ltv_pct"
+          className="block text-sm font-medium text-gray-700 mb-1"
+        >
+          Liquidation LTV %
+        </label>
+        <input
+          id="liquidation_ltv_pct"
+          type="number"
+          min="0.0001"
+          max="99.9999"
+          step="0.0001"
+          value={values.liquidation_ltv_pct}
+          onChange={(e) => setField('liquidation_ltv_pct', e.target.value)}
+          className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+        />
+        {fieldErrors.liquidation_ltv_pct && (
+          <p role="alert" className="text-sm text-red-600 mt-1">
+            {fieldErrors.liquidation_ltv_pct}
           </p>
         )}
       </div>

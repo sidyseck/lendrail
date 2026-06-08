@@ -10,6 +10,7 @@ export interface Agreement {
   eligible_collateral: string[];
   initial_ltv_pct: string;           // Decimal serialized as string
   margin_call_ltv_pct: string;
+  liquidation_ltv_pct: string;
   recall_notice_days: number;
   max_loan_days: number;
   day_count_basis: 'actual_360' | 'actual_365';
@@ -29,6 +30,7 @@ export interface AgreementTermsRequest {
   eligible_collateral: string[];
   initial_ltv_pct: number;
   margin_call_ltv_pct: number;
+  liquidation_ltv_pct: number;
   recall_notice_days: number;
   max_loan_days: number;
   day_count_basis: 'actual_360' | 'actual_365';

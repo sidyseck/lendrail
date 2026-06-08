@@ -43,6 +43,19 @@ export function validateMarginCallLtv(
   return null;
 }
 
+export function validateLiquidationLtv(
+  liquidation: string,
+  marginCall: string,
+): string | null {
+  const liquidationNum = parseFloat(liquidation);
+  const marginNum = parseFloat(marginCall);
+  if (isNaN(liquidationNum) || isNaN(marginNum)) return null;
+  if (liquidationNum <= marginNum) {
+    return 'Liquidation LTV % must be greater than Margin Call LTV %';
+  }
+  return null;
+}
+
 export function validatePositiveInt(
   value: string,
   fieldLabel: string,

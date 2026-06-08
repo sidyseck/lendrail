@@ -18,6 +18,7 @@ const INITIAL_AGREEMENTS: Agreement[] = [
     eligible_collateral: ['USDC'],
     initial_ltv_pct: '65.0000',
     margin_call_ltv_pct: '80.0000',
+    liquidation_ltv_pct: '90.0000',
     recall_notice_days: 2,
     max_loan_days: 90,
     day_count_basis: 'actual_360',
@@ -74,6 +75,7 @@ export const agreementsHandlers = [
       eligible_collateral?: unknown;
       initial_ltv_pct?: unknown;
       margin_call_ltv_pct?: unknown;
+      liquidation_ltv_pct?: unknown;
       recall_notice_days?: unknown;
       max_loan_days?: unknown;
       day_count_basis?: unknown;
@@ -92,6 +94,7 @@ export const agreementsHandlers = [
       eligible_collateral: body.eligible_collateral as string[],
       initial_ltv_pct: String(body.initial_ltv_pct),
       margin_call_ltv_pct: String(body.margin_call_ltv_pct),
+      liquidation_ltv_pct: String(body.liquidation_ltv_pct),
       recall_notice_days: Number(body.recall_notice_days),
       max_loan_days: Number(body.max_loan_days),
       day_count_basis: body.day_count_basis as 'actual_360' | 'actual_365',
@@ -175,6 +178,7 @@ export const agreementsHandlers = [
       eligible_collateral?: unknown;
       initial_ltv_pct?: unknown;
       margin_call_ltv_pct?: unknown;
+      liquidation_ltv_pct?: unknown;
       recall_notice_days?: unknown;
       max_loan_days?: unknown;
       day_count_basis?: unknown;
@@ -189,6 +193,7 @@ export const agreementsHandlers = [
       eligible_collateral: body.eligible_collateral as string[],
       initial_ltv_pct: String(body.initial_ltv_pct),
       margin_call_ltv_pct: String(body.margin_call_ltv_pct),
+      liquidation_ltv_pct: String(body.liquidation_ltv_pct),
       recall_notice_days: Number(body.recall_notice_days),
       max_loan_days: Number(body.max_loan_days),
       day_count_basis: body.day_count_basis as 'actual_360' | 'actual_365',
