@@ -31,3 +31,26 @@ export interface TerminateResponse {
   flagged_loan_ids: string[];
   message: string;
 }
+
+export interface InventoryScopeEntrySupplier {
+  asset_type: string;
+  custodian_balance: string;
+  published_quantity: string;
+  already_booked: string;
+  effective_available: string;
+}
+
+export interface InventoryScopeEntryAgent {
+  asset_type: string;
+  effective_available: string;
+}
+
+export interface InventoryScopeSupplierResponse {
+  connection_id: string;
+  entries: InventoryScopeEntrySupplier[];
+}
+
+export interface InventoryScopeAgentResponse {
+  connection_id: string;
+  entries: InventoryScopeEntryAgent[];
+}

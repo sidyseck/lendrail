@@ -8,6 +8,7 @@ import { Link } from 'react-router-dom';
 import { getToken } from '@/auth/tokenStore';
 import { useConnections } from '@/hooks/useConnections';
 import { useConnectionAction } from '@/hooks/useConnectionAction';
+import { useInventoryScope } from '@/hooks/useInventoryScope';
 import { StatusBadge } from '@/components/StatusBadge';
 
 const API_BASE =
@@ -18,6 +19,44 @@ function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) h['Authorization'] = `Bearer ${token}`;
   return h;
+}
+
+interface EffectiveAvailableRowProps {
+  connectionId: string;
+}
+
+function EffectiveAvailableRow({ connectionId }: EffectiveAvailableRowProps) {
+  const { data, isLoading, error } = useInventoryScope(connectionId);
+  const available = (data?.entries ?? []).filter(
+    (entry) => Number(entry.effective_available) > 0,
+  );
+
+  if (isLoading) {
+    return <span className="text-xs text-gray-500">Available: loading…</span>;
+  }
+
+  if (error) {
+    return (
+      <span role="alert" className="text-xs text-red-600">
+        {error}
+      </span>
+    );
+  }
+
+  if (available.length === 0) {
+    return (
+      <span className="text-xs text-gray-500">
+        Available: — (no inventory published)
+      </span>
+    );
+  }
+
+  return (
+    <span className="text-xs text-gray-600">
+      Available:{' '}
+      {available.map((entry) => `${entry.asset_type} ${entry.effective_available}`).join('  ')}
+    </span>
+  );
 }
 
 export function AgentConnectionsPage() {
@@ -83,7 +122,12 @@ export function AgentConnectionsPage() {
             {connections.map((conn) => (
               <tr key={conn.connection_id} className="border-b border-gray-100">
                 <td className="py-3 pr-4 font-mono text-xs text-gray-700">
-                  {conn.supplier_id.slice(0, 8)}…
+                  <div>{conn.supplier_id.slice(0, 8)}…</div>
+                  {conn.status === 'active' && (
+                    <div className="mt-1 font-sans">
+                      <EffectiveAvailableRow connectionId={conn.connection_id} />
+                    </div>
+                  )}
                 </td>
                 <td className="py-3 pr-4">
                   <StatusBadge status={conn.status} />

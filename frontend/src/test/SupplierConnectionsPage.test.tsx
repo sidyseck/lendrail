@@ -1,6 +1,6 @@
 // src/test/SupplierConnectionsPage.test.tsx
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -83,6 +83,79 @@ describe('SupplierConnectionsPage', () => {
       expect(
         screen.getByText(/no connections yet/i),
       ).toBeInTheDocument();
+    });
+  });
+
+  // ── Inventory scope ────────────────────────────────────────────────────────
+
+  it('opens inventory manager for active connections and saves scope edits', async () => {
+    const user = userEvent.setup();
+    let savedBody: { scope: Record<string, string> } | null = null;
+
+    server.use(
+      http.put('/api/connections/conn-002/inventory-scope', async ({ request }) => {
+        savedBody = (await request.json()) as { scope: Record<string, string> };
+        return HttpResponse.json(
+          {
+            connection_id: 'conn-002',
+            supplier_id: 'org-001',
+            agent_id: 'org-003',
+            status: 'active',
+            created_at: '2026-06-01T00:00:00Z',
+            activated_at: '2026-06-02T00:00:00Z',
+          },
+          { status: 200 },
+        );
+      }),
+    );
+
+    renderPage();
+    await waitFor(() => screen.getByRole('button', { name: /manage inventory/i }));
+
+    await user.click(screen.getByRole('button', { name: /manage inventory/i }));
+    const dialog = await screen.findByRole('dialog', { name: /manage inventory/i });
+    await waitFor(() => {
+      expect(within(dialog).getByText('BTC')).toBeInTheDocument();
+      expect(within(dialog).getByText('500.0')).toBeInTheDocument();
+    });
+
+    await user.type(within(dialog).getByLabelText(/asset type/i), 'SOL');
+    await user.type(within(dialog).getByLabelText(/^quantity$/i), '15.5');
+    await user.click(within(dialog).getByRole('button', { name: /add asset/i }));
+    expect(within(dialog).getByLabelText(/SOL quantity/i)).toHaveValue('15.5');
+
+    await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => {
+      expect(savedBody).toEqual({
+        scope: {
+          BTC: '100.0',
+          ETH: '25.0',
+          SOL: '15.5',
+        },
+      });
+      expect(screen.queryByRole('dialog', { name: /manage inventory/i })).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows inline validation error for invalid inventory quantity', async () => {
+    const user = userEvent.setup();
+
+    renderPage();
+    await waitFor(() => screen.getByRole('button', { name: /manage inventory/i }));
+
+    await user.click(screen.getByRole('button', { name: /manage inventory/i }));
+    const dialog = await screen.findByRole('dialog', { name: /manage inventory/i });
+    await waitFor(() => within(dialog).getByText('BTC'));
+
+    await user.clear(within(dialog).getByLabelText(/BTC quantity/i));
+    await user.type(within(dialog).getByLabelText(/BTC quantity/i), '-1');
+    await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => {
+      expect(within(dialog).getByRole('alert')).toHaveTextContent(
+        /invalid quantity for BTC/i,
+      );
     });
   });
 

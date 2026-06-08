@@ -111,6 +111,16 @@ describe('AgentConnectionsPage', () => {
     });
   });
 
+  it('shows effective availability for active connections without raw inventory fields', async () => {
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Available: BTC 100\.0\s+ETH 25\.0/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText('500.0')).not.toBeInTheDocument();
+    expect(screen.queryByText('250.0')).not.toBeInTheDocument();
+  });
+
   // ── Accept flow ──────────────────────────────────────────────────────────────
 
   it('calls accept endpoint when "Accept" is clicked', async () => {
