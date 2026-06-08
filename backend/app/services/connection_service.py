@@ -50,6 +50,7 @@ class ConnectionResult:
     custodian_link_id: uuid.UUID | None
     created_at: str         # ISO-8601
     activated_at: str | None
+    pending_agreement: bool = False  # True if latest agreement is unconfirmed (M3)
 
 
 @dataclass
@@ -66,7 +67,7 @@ class TerminateResult:
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-def _to_result(c) -> ConnectionResult:
+def _to_result(c, pending_agreement: bool = False) -> ConnectionResult:
     return ConnectionResult(
         id=c.id,
         supplier_id=c.supplier_id,
@@ -75,6 +76,7 @@ def _to_result(c) -> ConnectionResult:
         custodian_link_id=c.custodian_link_id,
         created_at=c.created_at.isoformat(),
         activated_at=c.activated_at.isoformat() if c.activated_at else None,
+        pending_agreement=pending_agreement,
     )
 
 

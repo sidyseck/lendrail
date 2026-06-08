@@ -25,7 +25,7 @@ function renderPage() {
 }
 
 async function fillValidForm(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
+  await user.type(screen.getByLabelText(/legal entity name/i), 'Atlas Lending');
   await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
   await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
   await user.type(screen.getByLabelText(/primary contact email/i), 'atlas@example.com');
@@ -44,7 +44,7 @@ describe('AgentRegisterPage', () => {
 
   it('renders all required fields including ops contact and attestation checkbox', () => {
     renderPage();
-    expect(screen.getByLabelText(/entity name/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/legal entity name/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/jurisdiction/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/entity type/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/primary contact email/i)).toBeInTheDocument();
@@ -74,14 +74,14 @@ describe('AgentRegisterPage', () => {
     const user = userEvent.setup();
     renderPage();
     // Fill all text fields validly but do not check the attestation box
-    await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
+    await user.type(screen.getByLabelText(/legal entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
     await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'atlas@example.com');
     await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'ops@example.com');
     await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
     // Do NOT click the attestation checkbox
-    await user.click(screen.getByRole('button', { name: /create agent account/i }));
+    await user.click(screen.getByRole('button', { name: /create organization and agent account/i }));
     expect(
       screen.getByText(/you must attest to your regulatory status/i),
     ).toBeInTheDocument();
@@ -94,13 +94,13 @@ describe('AgentRegisterPage', () => {
     // onUnhandledRequest: 'error' — a real network call would throw).
     const user = userEvent.setup();
     renderPage();
-    await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
+    await user.type(screen.getByLabelText(/legal entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
     await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'atlas@example.com');
     await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'ops@example.com');
     await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
-    await user.click(screen.getByRole('button', { name: /create agent account/i }));
+    await user.click(screen.getByRole('button', { name: /create organization and agent account/i }));
     // If a network call was made and the handler was missing, vitest would throw.
     // Reaching this line means no network call was made.
     expect(screen.getByText(/you must attest to your regulatory status/i)).toBeInTheDocument();
@@ -111,14 +111,14 @@ describe('AgentRegisterPage', () => {
   it('shows an error when ops/settlement email is empty', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
+    await user.type(screen.getByLabelText(/legal entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
     await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'atlas@example.com');
     // Leave ops email empty
     await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
     await user.click(screen.getByLabelText(/i confirm that my organization/i));
-    await user.click(screen.getByRole('button', { name: /create agent account/i }));
+    await user.click(screen.getByRole('button', { name: /create organization and agent account/i }));
     expect(
       screen.getByText(/ops\/settlement contact email is required/i),
     ).toBeInTheDocument();
@@ -128,7 +128,7 @@ describe('AgentRegisterPage', () => {
     const user = userEvent.setup();
     renderPage();
     await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'not-an-email');
-    await user.click(screen.getByRole('button', { name: /create agent account/i }));
+    await user.click(screen.getByRole('button', { name: /create organization and agent account/i }));
     expect(screen.getAllByText(/must be a valid email address/i).length).toBeGreaterThan(0);
   });
 
@@ -138,7 +138,7 @@ describe('AgentRegisterPage', () => {
     const user = userEvent.setup();
     renderPage();
     await fillValidForm(user);
-    await user.click(screen.getByRole('button', { name: /create agent account/i }));
+    await user.click(screen.getByRole('button', { name: /create organization and agent account/i }));
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith('/dashboard', { replace: true });
     });
@@ -148,7 +148,7 @@ describe('AgentRegisterPage', () => {
     const user = userEvent.setup();
     renderPage();
     await fillValidForm(user);
-    const button = screen.getByRole('button', { name: /create agent account/i });
+    const button = screen.getByRole('button', { name: /create organization and agent account/i });
     await user.click(button);
     expect(button).toBeDisabled();
     // Await completion to prevent dangling promises affecting subsequent tests
@@ -160,14 +160,14 @@ describe('AgentRegisterPage', () => {
   it('shows "Email already registered" for a duplicate email (409)', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
+    await user.type(screen.getByLabelText(/legal entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
     await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'duplicate@lendrail.test');
     await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'ops@example.com');
     await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
     await user.click(screen.getByLabelText(/i confirm that my organization/i));
-    await user.click(screen.getByRole('button', { name: /create agent account/i }));
+    await user.click(screen.getByRole('button', { name: /create organization and agent account/i }));
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent('Email already registered');
     });
@@ -179,14 +179,14 @@ describe('AgentRegisterPage', () => {
   it('shows a server error for a 422 response', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.type(screen.getByLabelText(/entity name/i), 'Atlas Lending');
+    await user.type(screen.getByLabelText(/legal entity name/i), 'Atlas Lending');
     await user.type(screen.getByLabelText(/jurisdiction/i), 'New York, USA');
     await user.selectOptions(screen.getByLabelText(/entity type/i), 'fund');
     await user.type(screen.getByLabelText(/primary contact email/i), 'invalid422@lendrail.test');
     await user.type(screen.getByLabelText(/ops\/settlement contact email/i), 'ops@example.com');
     await user.type(screen.getByLabelText(/password/i), 'Atlas@Str0ng!2026');
     await user.click(screen.getByLabelText(/i confirm that my organization/i));
-    await user.click(screen.getByRole('button', { name: /create agent account/i }));
+    await user.click(screen.getByRole('button', { name: /create organization and agent account/i }));
     await waitFor(() => {
       expect(screen.getByRole('alert')).toBeInTheDocument();
     });

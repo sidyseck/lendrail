@@ -33,7 +33,7 @@ export function SupplierRegisterPage() {
     e.preventDefault();
 
     const errors: FieldErrors = {};
-    const nameErr = validateRequired(name, 'Legal name');
+    const nameErr = validateRequired(name, 'Legal entity name');
     if (nameErr) errors.name = nameErr;
     const jurisdictionErr = validateRequired(jurisdiction, 'Jurisdiction');
     if (jurisdictionErr) errors.jurisdiction = jurisdictionErr;
@@ -61,8 +61,13 @@ export function SupplierRegisterPage() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50">
       <div className="w-full max-w-md rounded-lg border border-gray-200 bg-white p-8 shadow-sm">
-        <h1 className="mb-2 text-2xl font-semibold text-gray-900">Register as a Supplier</h1>
+        <h1 className="mb-2 text-2xl font-semibold text-gray-900">
+          Create your organization
+        </h1>
         <p className="mb-6 text-sm text-gray-500">
+          Start with one supplier legal-entity account. Your organization name
+          defaults to the legal entity name and can be edited by the admin user later.
+          {' '}
           Already have an account?{' '}
           <Link to="/login" className="text-blue-600 hover:underline">
             Sign in
@@ -70,9 +75,9 @@ export function SupplierRegisterPage() {
         </p>
 
         <form onSubmit={handleSubmit} noValidate className="space-y-4">
-          {/* Legal name */}
+          {/* Legal entity name */}
           <div className="space-y-1">
-            <Label htmlFor="name">Legal name</Label>
+            <Label htmlFor="name">Legal entity name</Label>
             <Input
               id="name"
               type="text"
@@ -178,7 +183,7 @@ export function SupplierRegisterPage() {
           )}
 
           <Button type="submit" className="w-full" disabled={isLoading}>
-            {isLoading ? 'Creating account…' : 'Create supplier account'}
+            {isLoading ? 'Creating organization…' : 'Create organization and supplier account'}
           </Button>
         </form>
 

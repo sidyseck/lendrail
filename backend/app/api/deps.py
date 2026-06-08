@@ -27,10 +27,12 @@ from app.repositories.org_repository import OrgRepository
 from app.repositories.borrower_repository import BorrowerRepository
 from app.repositories.custodian_link_repository import CustodianLinkRepository
 from app.repositories.connection_repository import ConnectionRepository
+from app.repositories.agreement_repository import AgreementRepository
 from app.services.auth_service import AuthService
 from app.services.org_service import OrgService
 from app.services.borrower_service import BorrowerService
 from app.services.connection_service import ConnectionService
+from app.services.agreement_service import AgreementService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -122,5 +124,18 @@ def get_connection_service(
         orgs=OrgRepository(session),
         secret_store=secret_store,
         custodian_adapter=custodian_adapter,
+        notifier=notifier,
+    )
+
+
+# ---- agreement service ----
+
+
+def get_agreement_service(session: SessionDep) -> AgreementService:
+    notifier = ConsoleNotificationAdapter(NotificationRepository(session))
+    return AgreementService(
+        agreements=AgreementRepository(session),
+        connections=ConnectionRepository(session),
+        users=UserRepository(session),
         notifier=notifier,
     )

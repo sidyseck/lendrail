@@ -25,6 +25,7 @@ const INITIAL_CONNECTIONS: Connection[] = [
     custodian_link_present: false,
     created_at:    '2026-06-08T00:00:00Z',
     activated_at:  null,
+    pending_agreement: false,
   },
   {
     connection_id: 'conn-002',
@@ -34,6 +35,7 @@ const INITIAL_CONNECTIONS: Connection[] = [
     custodian_link_present: true,
     created_at:    '2026-06-01T00:00:00Z',
     activated_at:  '2026-06-02T00:00:00Z',
+    pending_agreement: true,
   },
 ];
 

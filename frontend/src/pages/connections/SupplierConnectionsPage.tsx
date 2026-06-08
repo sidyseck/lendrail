@@ -6,10 +6,12 @@
 //   MSW intercepts '/api/connections/...' (full /api-prefixed path at network level).
 
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { getToken } from '@/auth/tokenStore';
 import { useConnections } from '@/hooks/useConnections';
 import { useConnectionAction } from '@/hooks/useConnectionAction';
 import { StatusBadge } from '@/components/StatusBadge';
+import { AgreementStatusBadge } from '@/components/agreements/AgreementStatusBadge';
 import { validateEmail } from '@/lib/validators';
 import type { Connection } from '@/types/connection';
 
@@ -460,6 +462,7 @@ export function SupplierConnectionsPage() {
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Agent ID</th>
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Status</th>
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Created</th>
+              <th className="py-2 pr-4 text-left font-medium text-gray-600">Agreement</th>
               <th className="py-2 text-left font-medium text-gray-600">Actions</th>
             </tr>
           </thead>
@@ -474,6 +477,21 @@ export function SupplierConnectionsPage() {
                 </td>
                 <td className="py-3 pr-4 text-gray-600">
                   {new Date(conn.created_at).toLocaleDateString()}
+                </td>
+                <td className="py-3 pr-4">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {conn.status === 'active' && (
+                      <Link
+                        to={`/dashboard/connections/${conn.connection_id}/agreement`}
+                        className="text-xs text-blue-600 hover:underline"
+                      >
+                        Agreement
+                      </Link>
+                    )}
+                    {conn.pending_agreement === true && (
+                      <AgreementStatusBadge status="pending_confirmation" />
+                    )}
+                  </div>
                 </td>
                 <td className="py-3 flex gap-2 flex-wrap">
                   {conn.status === 'accepted' && (

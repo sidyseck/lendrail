@@ -4,6 +4,7 @@
 // MSW intercepts '/api/connections/...' at network level.
 
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { getToken } from '@/auth/tokenStore';
 import { useConnections } from '@/hooks/useConnections';
 import { useConnectionAction } from '@/hooks/useConnectionAction';
@@ -74,6 +75,7 @@ export function AgentConnectionsPage() {
               </th>
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Status</th>
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Created</th>
+              <th className="py-2 pr-4 text-left font-medium text-gray-600">Agreement</th>
               <th className="py-2 text-left font-medium text-gray-600">Actions</th>
             </tr>
           </thead>
@@ -88,6 +90,16 @@ export function AgentConnectionsPage() {
                 </td>
                 <td className="py-3 pr-4 text-gray-600">
                   {new Date(conn.created_at).toLocaleDateString()}
+                </td>
+                <td className="py-3 pr-4">
+                  {conn.status === 'active' && (
+                    <Link
+                      to={`/dashboard/connections/${conn.connection_id}/agreement`}
+                      className="text-xs text-blue-600 hover:underline"
+                    >
+                      Agreement
+                    </Link>
+                  )}
                 </td>
                 <td className="py-3">
                   {conn.status === 'pending' && (

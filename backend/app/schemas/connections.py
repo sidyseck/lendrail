@@ -47,6 +47,7 @@ class ConnectionResponse(BaseModel):
     custodian_link_present: bool     # True if custodian_link_id is not None
     created_at: str                  # ISO-8601
     activated_at: str | None         # ISO-8601 or null
+    pending_agreement: bool = False  # True if latest agreement is pending confirmation (M3)
 
 
 class ConnectionListResponse(BaseModel):

@@ -5,6 +5,7 @@ export function DashboardPage() {
   const { role, logout } = useAuth();
   const location = useLocation();
   const onConnections = location.pathname.startsWith('/dashboard/connections');
+  const onOrganization = location.pathname.startsWith('/dashboard/organization');
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -18,6 +19,12 @@ export function DashboardPage() {
               className={`text-sm ${onConnections ? 'font-semibold text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}
             >
               Connections
+            </Link>
+            <Link
+              to="/dashboard/organization"
+              className={`text-sm ${onOrganization ? 'font-semibold text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}
+            >
+              Organization
             </Link>
             {role && (
               <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium capitalize text-gray-600">

@@ -3,7 +3,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, status
 
-from app.api.deps import get_connection_service, get_current_user
+from app.api.deps import get_agreement_service, get_connection_service, get_current_user
 from app.api.rbac import require_role
 from app.schemas.auth import AuthUser
 from app.schemas.connections import (
@@ -14,6 +14,7 @@ from app.schemas.connections import (
     RegisterCustodianKeyRequest,
     TerminateResponse,
 )
+from app.services.agreement_service import AgreementService
 from app.services.connection_service import (
     ConnectionService,
     InviteConnectionInput,
@@ -32,7 +33,19 @@ def _to_response(result) -> ConnectionResponse:
         custodian_link_present=result.custodian_link_id is not None,
         created_at=result.created_at,
         activated_at=result.activated_at,
+        pending_agreement=result.pending_agreement,
     )
+
+
+async def _with_pending_agreement(
+    result,
+    agreement_svc: AgreementService,
+) -> ConnectionResponse:
+    """Populate pending_agreement by querying the agreements repository."""
+    latest = await agreement_svc.agreements.get_latest_for_connection(result.id)
+    pending = latest is not None and not latest.is_active
+    result.pending_agreement = pending
+    return _to_response(result)
 
 
 # ── F-022 ─────────────────────────────────────────────────────────────────────
@@ -188,6 +201,7 @@ async def terminate(
 async def list_connections(
     caller: AuthUser = Depends(get_current_user),
     svc: ConnectionService = Depends(get_connection_service),
+    agreement_svc: AgreementService = Depends(get_agreement_service),
 ) -> ConnectionListResponse:
     """
     Supplier: returns connections where supplier_id = caller.org_id.
@@ -195,9 +209,11 @@ async def list_connections(
     Admin: returns all connections.
     """
     result = await svc.list_for_org(caller=caller)
-    return ConnectionListResponse(
-        connections=[_to_response(r) for r in result.connections]
-    )
+    responses = [
+        await _with_pending_agreement(r, agreement_svc)
+        for r in result.connections
+    ]
+    return ConnectionListResponse(connections=responses)
 
 
 # ── F-026 — detail ────────────────────────────────────────────────────────────
@@ -212,10 +228,11 @@ async def get_connection(
     connection_id: uuid.UUID,
     caller: AuthUser = Depends(get_current_user),
     svc: ConnectionService = Depends(get_connection_service),
+    agreement_svc: AgreementService = Depends(get_agreement_service),
 ) -> ConnectionResponse:
     """
     Caller must be a party to the connection (supplier_id or agent_id match),
     or be an admin.
     """
     result = await svc.get_detail(caller=caller, connection_id=connection_id)
-    return _to_response(result)
+    return await _with_pending_agreement(result, agreement_svc)

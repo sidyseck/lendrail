@@ -13,7 +13,7 @@
 | Milestone | Goal |
 |---|---|
 | **M0 — Foundation** | Project scaffolding, Docker Compose, DB migrations, auth skeleton. Nothing domain-specific. |
-| **M1 — Onboarding** | Supplier, Agent, and Borrower can register and be recognized by the system. |
+| **M1 — Onboarding** | Supplier, Agent, and Borrower can register and be recognized by the system; org workspaces can manage legal-entity accounts, users, roles, and MVP read/write permissions. |
 | **M2 — Connection** | Supplier and Agent can connect; custodian API key provisioned and validated against mock. |
 | **M3 — Agreement** | Lending agreement terms entered and dual-confirmed. |
 | **M4 — Loan lifecycle** | Agent books loans; loans move through states; mock custodian confirms. |
@@ -214,7 +214,7 @@
 **Depends on:** F-002
 **Actor(s):** System
 
-**What it does:** Adds the `organizations` Alembic migration creating the `Organization` table with columns: `id` (UUID PK), `name`, `jurisdiction`, `entity_type` (ENUM), `role` (ENUM: supplier, agent, admin), `contact_email`, `created_at`.
+**What it does:** Adds the `organizations` Alembic migration creating the `Organization` table with columns: `id` (UUID PK), `name`, `jurisdiction`, `entity_type` (ENUM), `role` (ENUM: supplier, agent, admin), `contact_email`, `created_at`. In M1, this table remains the compatibility record used by downstream connection workflows while the onboarding UI presents it as a workspace created with one initial legal-entity account.
 
 **Acceptance criteria:**
 - [ ] `alembic upgrade head` applies the migration without errors.
@@ -249,10 +249,13 @@
 **Depends on:** F-011, F-012, F-005
 **Actor(s):** Supplier
 
-**What it does:** Implements `POST /orgs/register` (public endpoint, no auth required) accepting `name`, `jurisdiction`, `entity_type`, `contact_email`, `password`, and `role=supplier`. Creates the `Organization` row, hashes and stores the user's password, and returns a JWT so the user is immediately logged in.
+**What it does:** Implements supplier signup as the first onboarding action: create one organization workspace with one initial supplier legal-entity account. The public endpoint accepts `name` (the initial legal entity name, also used as the default organization name), `jurisdiction`, `entity_type`, `contact_email`, and `password`. The platform generates a unique `org_id`, creates the initial admin user from `contact_email`, hashes and stores the user's password, and returns a JWT so the user is immediately logged in.
 
 **Acceptance criteria:**
 - [ ] `POST /orgs/register` with valid supplier fields returns HTTP 201 with `{ "org_id": "...", "access_token": "..." }`.
+- [ ] The created organization name defaults to the submitted legal entity name.
+- [ ] The returned `org_id` is unique and stable for downstream M1/M2/M3 records.
+- [ ] The first user created from `contact_email` is treated as the initial organization admin for organization-name edits and future user/account management.
 - [ ] The returned JWT contains `role=supplier` and the correct `org_id`.
 - [ ] Attempting to register with an already-used email returns HTTP 409 with an error body.
 - [ ] `entity_type` values outside the allowed ENUM return HTTP 422.
@@ -268,10 +271,12 @@
 **Depends on:** F-010, F-013
 **Actor(s):** Supplier
 
-**What it does:** React page at `/register/supplier` with a form for legal name, jurisdiction, entity type (dropdown), primary contact email, and password. On success, stores the token and redirects to `/dashboard`.
+**What it does:** React page at `/register/supplier` that makes "create your organization" the first action. The form creates one supplier organization workspace with one initial legal-entity account using legal entity name, jurisdiction, entity type (dropdown), primary contact email, and password. The organization name defaults to the legal entity name. On success, stores the token and redirects to `/dashboard`.
 
 **Acceptance criteria:**
 - [ ] All required fields display inline validation errors when submitted empty.
+- [ ] Page headline says the user is creating an organization, not only registering an account.
+- [ ] Helper copy explains the initial account rule: first signup creates one organization with one supplier legal-entity account, and the organization name can be edited later by the admin user.
 - [ ] `entity_type` dropdown offers exactly: Fund, Corporate Treasury, Foundation.
 - [ ] Successful submission stores the JWT and navigates to `/dashboard`.
 - [ ] A duplicate email submission shows a user-readable error message ("Email already registered").
@@ -286,10 +291,13 @@
 **Depends on:** F-011, F-012, F-005
 **Actor(s):** Agent
 
-**What it does:** Handles `POST /orgs/register` with `role=agent`, accepting `name`, `jurisdiction`, `entity_type`, primary contact, ops/settlement contact email, and self-attested regulatory status checkbox. Creates `Organization` and `User` rows. Returns a JWT.
+**What it does:** Implements agent signup as the first onboarding action: create one organization workspace with one initial agent lender legal-entity account. The endpoint accepts `name` (the initial legal entity name, also used as the default organization name), `jurisdiction`, `entity_type`, primary contact, ops/settlement contact email, and self-attested regulatory status checkbox. The platform generates a unique `org_id`, creates the initial admin user from the primary contact, and returns a JWT.
 
 **Acceptance criteria:**
 - [ ] `POST /orgs/register` with `role=agent` and all required fields returns HTTP 201 with `{ "org_id": "...", "access_token": "..." }`.
+- [ ] The created organization name defaults to the submitted legal entity name.
+- [ ] The returned `org_id` is unique and stable for downstream M1/M2/M3 records.
+- [ ] The first user created from the primary contact is treated as the initial organization admin for organization-name edits and future user/account management.
 - [ ] The returned JWT contains `role=agent`.
 - [ ] Missing `ops_contact_email` returns HTTP 422.
 - [ ] `regulatory_status_attested=false` returns HTTP 422 with a message indicating attestation is required.
@@ -305,9 +313,11 @@
 **Depends on:** F-010, F-015
 **Actor(s):** Agent
 
-**What it does:** React page at `/register/agent` with a form for entity details, ops/settlement contact, and a required regulatory status attestation checkbox.
+**What it does:** React page at `/register/agent` that makes "create your organization" the first action. The form creates one agent lender organization workspace with one initial legal-entity account using legal entity details, ops/settlement contact, and a required regulatory status attestation checkbox. The organization name defaults to the legal entity name.
 
 **Acceptance criteria:**
+- [ ] Page headline says the user is creating an organization, not only registering an account.
+- [ ] Helper copy explains the initial account rule: first signup creates one organization with one agent lender legal-entity account, and the organization name can be edited later by the admin user.
 - [ ] Form shows an error when the attestation checkbox is unchecked and the user tries to submit.
 - [ ] Ops/settlement contact email field is present and required.
 - [ ] Successful submission stores the JWT and navigates to `/dashboard`.
@@ -365,6 +375,30 @@
 - [ ] The response never includes `hashed_password`.
 
 **Out of scope for this feature:** Org update/edit endpoints.
+
+---
+
+### F-019A — Organization management placeholder UI
+**Milestone:** M1
+**Depends on:** F-010, F-011, F-012, F-005
+**Actor(s):** Supplier, Agent, Admin
+
+**What it does:** Adds a protected dashboard page at `/dashboard/organization` that models organization management before the full backend workflow is implemented. The page treats an organization as a workspace, shows the unique organization ID from onboarding, shows that the initial creator is the admin user, treats accounts as actual legal entities, allows placeholder account and user creation, and demonstrates role assignment with read/write permissions. Write permission descriptions differ by account type: supplier write covers inventory scope, borrower approval, program-term confirmation, and supplier-side instructions; agent lender write covers borrower onboarding, loan booking, collateral reconciliation, and settlement instruction initiation.
+
+**Acceptance criteria:**
+- [ ] Dashboard navigation includes an "Organization" link for authenticated users.
+- [ ] The organization page shows the generated organization ID.
+- [ ] The organization page shows the initial creator as the admin user.
+- [ ] The organization page allows the admin user to edit the workspace name in local placeholder state.
+- [ ] A user can create a legal-entity account with legal name, jurisdiction, and account type (`supplier` or `agent lender`) in local placeholder state.
+- [ ] A user can create a user record and attach it to an account.
+- [ ] A user can assign one of the MVP roles to the user: supplier read, supplier write, agent lender read, or agent lender write.
+- [ ] The page displays an account directory, a role model summary, and user assignments.
+- [ ] The role model clearly distinguishes read from write and explains how write differs for supplier vs agent lender accounts.
+- [ ] TypeScript compilation passes with zero errors.
+- [ ] Frontend tests cover rendering the placeholder and creating an account/user assignment.
+
+**Out of scope for this feature:** Persisting organizations/accounts/users through API endpoints; custom role creation; fine-grained permission matrix; SSO/SCIM; multi-account user membership policy; invite/approval workflow for user provisioning.
 
 ---
 

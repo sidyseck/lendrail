@@ -39,6 +39,7 @@ Four parties interact with the platform in the MVP. Roles and responsibilities a
 
 - Supplier onboarding and inventory publishing
 - Agent lender onboarding
+- Organization management: workspace creation, legal-entity accounts, users, roles, and read/write permissions
 - Borrower account creation (invite-only, deferred activation)
 - Custodian API integration (inventory + collateral feeds, read-only)
 - Supplier-agent secure pairing
@@ -68,18 +69,47 @@ Four parties interact with the platform in the MVP. Roles and responsibilities a
 
 **Philosophy:** LendRail is a technology platform, not a financial services provider. Onboarding collects identity and entity information sufficient to operate the platform and satisfy basic counterparty verification. We do not perform regulated KYC/AML in MVP — that obligation sits with the agent lender for their borrower relationships. This boundary must be reviewed with legal before launch.
 
+#### F1.0 — Organization, Account, and User Management
+
+The platform separates workspaces from legal entities. An **organization** is the workspace where a customer manages access and operating context. An **account** is an actual legal entity that can participate as a supplier or agent lender. A single organization may manage one or more accounts, and users are attached to accounts through roles.
+
+The first onboarding action is always organization creation. During initial signup, the user creates one organization with one initial account. By default, the organization name is the same as the initial legal entity account name. The platform generates a unique organization ID at creation time. The user who creates the organization becomes the initial organization admin and can edit the organization name later.
+
+**What it includes:**
+- Organization/workspace creation as the first onboarding step
+- Initial legal-entity account creation in the same flow
+- Default organization name copied from the initial legal entity name
+- Unique organization ID generation
+- Initial creator assigned as organization admin
+- Organization name editing by an organization admin after onboarding
+- Additional legal-entity account creation within an organization
+- Account type selection: supplier or agent lender
+- User creation and assignment to one or more accounts
+- Role assignment with MVP permission levels: read or write
+- Permission descriptions that vary by account type
+
+**Permission model:**
+- Read permission allows a user to view account records, related connections, program terms, loans, risk metrics, and statements made visible to that account.
+- Supplier write permission allows a user to manage inventory scope, approve borrowers, confirm program terms, and issue supplier-side instructions.
+- Agent lender write permission allows a user to onboard borrowers, book loans, reconcile collateral, and initiate settlement instructions.
+
+**Why in MVP:** The MVP has multiple institutions and multiple users operating across legally distinct entities. The platform must model workspaces, legal entities, and user authority before lending workflows can be safely expanded.
+
+**Deferred:** Fine-grained permission matrix, custom roles, multi-account membership policy, approval workflows for user provisioning, SSO, SCIM, and audit export.
+
 #### F1.1 — Supplier Onboarding
 
 The supplier is the day-1 paying customer. Their onboarding is the first impression and must be low-friction while collecting what the platform needs to configure their program.
 
 **What it includes:**
-- Entity registration: legal name, jurisdiction, entity type (fund, corporate treasury, foundation)
+- Organization creation with one initial supplier account
+- Initial account registration: legal entity name, jurisdiction, entity type (fund, corporate treasury, foundation)
 - Primary contact and authorized signatory
 - Custodian linkage: authorize the platform to pull inventory data via API from their custodian account
 - Lendable asset scope: confirm which assets are eligible for lending (MVP: BTC only)
 - Notification preferences: how the supplier wants to receive alerts and reports
 
-**Why in MVP:** Cannot publish inventory or configure a program without this. It is the entry point for everything else.
+**Why in MVP:** Cannot publish inventory or configure a program without an organization workspace and at least one supplier legal entity account. It is the entry point for everything else.
 
 **Deferred:** Document upload (lending agreement extraction, entity docs). Multi-custodian linkage (designed for but not exposed in MVP).
 
@@ -88,12 +118,13 @@ The supplier is the day-1 paying customer. Their onboarding is the first impress
 The agent lender is invited by the supplier or applies directly. They are a participant in MVP (non-paying) and must be recognized by the platform before they can be connected to a supplier.
 
 **What it includes:**
-- Entity registration: legal name, jurisdiction, entity type
+- Organization creation with one initial agent lender account
+- Initial account registration: legal entity name, jurisdiction, entity type
 - Primary contact and ops/settlement contact
 - Custodian linkage: authorize collateral data feed for borrower accounts they manage
 - Confirmation of regulatory status (self-attested in MVP — no verification)
 
-**Why in MVP:** Agent lender must exist in the system before the supplier-agent pairing can be created. They are also the party that books loans and onboards borrowers.
+**Why in MVP:** Agent lender organization and initial account must exist in the system before the supplier-agent pairing can be created. They are also the party that books loans and onboards borrowers.
 
 **Deferred:** Agent-side subscription billing, performance reporting access, market data.
 
