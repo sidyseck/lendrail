@@ -40,7 +40,18 @@ TEST_DATABASE_URL = os.environ["DATABASE_URL"]
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ALEMBIC_INI = os.path.join(BACKEND_DIR, "alembic.ini")
 
-_TABLES_TO_TRUNCATE = ["notifications", "borrowers", "lending_agreements", "connections", "custodian_links", "users", "organizations"]
+_TABLES_TO_TRUNCATE = [
+    "notifications",
+    "loan_state_transitions",
+    "loans",
+    "connection_approved_borrowers",
+    "borrowers",
+    "lending_agreements",
+    "connections",
+    "custodian_links",
+    "users",
+    "organizations",
+]
 
 
 def _run_alembic(*args: str) -> None:

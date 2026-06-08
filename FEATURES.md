@@ -427,13 +427,15 @@
 **Depends on:** F-020
 **Actor(s):** System
 
-**What it does:** Adds the `connections` Alembic migration with columns: `id`, `supplier_id` (FK → organizations), `agent_id` (FK → organizations), `status` (ENUM: pending, active, suspended, terminated), `custodian_link_id` (FK → custodian_links, nullable until key is registered), `created_at`, `activated_at`.
+**What it does:** Adds the `connections` Alembic migration (0008) and the M2-redesign migration (0010) with columns: `id`, `supplier_id` (FK → organizations), `agent_id` (FK → organizations), `status` (ENUM: `pending`, `active`, `suspended`, `terminated`), `created_at`, `activated_at`. `custodian_link_id` was initially added in 0008 and removed in 0010 — custodian management is org-level (see F-024). The `status` ENUM does not include `accepted`; `accept` transitions directly `pending → active`.
 
 **Acceptance criteria:**
-- [ ] `alembic upgrade head` and `downgrade -1` work cleanly.
-- [ ] `supplier_id` and `agent_id` must each reference an existing organization row.
-- [ ] `status` enforces the ENUM at DB level.
-- [ ] A UNIQUE constraint prevents two `connections` rows with the same `(supplier_id, agent_id)` pair.
+- [x] `alembic upgrade head` and `downgrade -1` work cleanly.
+- [x] `supplier_id` and `agent_id` must each reference an existing organization row.
+- [x] `status` enforces the ENUM at DB level.
+- [x] A partial UNIQUE index prevents two active `connections` rows for the same `(supplier_id, agent_id)` pair (`WHERE status != 'terminated'`).
+- [x] `activated_at` is set at the time of accept (when connection becomes active).
+- [x] `pending_agreement` boolean is included in `ConnectionResponse` (derived from agreement table, not stored on connection).
 
 **Out of scope for this feature:** Agreement table; loan table.
 
@@ -462,51 +464,64 @@
 **Depends on:** F-022, F-005, F-006
 **Actor(s):** Agent
 
-**What it does:** `POST /connections/{id}/accept` (agent JWT). Validates the connection belongs to the calling agent, transitions `status` to `pending` (awaiting API key), and sends a notification to the supplier.
+**What it does:** `POST /connections/{id}/accept` (agent JWT). Validates the connection belongs to the calling agent, transitions `status` directly `pending → active`, sets `activated_at`, and sends a notification to the supplier.
 
 **Acceptance criteria:**
-- [ ] `POST /connections/{id}/accept` with the correct agent JWT returns HTTP 200 with `{ "connection_id": "...", "status": "pending" }`.
-- [ ] Calling with a supplier JWT returns HTTP 403.
-- [ ] Calling with an agent whose `org_id` does not match the connection's `agent_id` returns HTTP 403.
-- [ ] Accepting a connection that is not in `pending` state returns HTTP 409.
-- [ ] A `"connection_accepted"` notification event is logged.
+- [x] `POST /connections/{id}/accept` with the correct agent JWT returns HTTP 200 with `{ "connection_id": "...", "status": "active", "activated_at": "<timestamp>" }`.
+- [x] Calling with a supplier JWT returns HTTP 403.
+- [x] Calling with an agent whose `org_id` does not match the connection's `agent_id` returns HTTP 403.
+- [x] Accepting a connection that is not in `pending` state returns HTTP 409.
+- [x] A `"connection_accepted"` notification event is logged.
 
-**Out of scope for this feature:** Custodian API key entry (F-024).
+**Implementation note:** The original spec described a two-step `pending → accepted → active` flow with an `accepted` intermediate state (see SD-001 in SPEC_DELTAS.md). This was simplified: `accept` now transitions directly to `active`. No intermediate `accepted` status exists.
+
+**Out of scope for this feature:** Custodian API key entry (see F-024).
 
 ---
 
-### F-024 — Supplier registers custodian API key for a connection
+### F-024 — Supplier manages custodian API keys (org-level)
 **Milestone:** M2
-**Depends on:** F-023, F-008, F-009, F-005
+**Depends on:** F-020, F-008, F-009, F-005
 **Actor(s):** Supplier
 
-**What it does:** `POST /connections/{id}/custodian-key` (supplier JWT). The supplier provides the plaintext API key and the custodian account reference. The platform: stores the key via `SecretStore`, calls `CustodianAdapter.validate_key()`, creates a `CustodianLink` row (storing only the vault ref), attaches it to the connection, and transitions `status` to `active` if validation succeeds.
+**What it does:** `POST /custodians` and `GET /custodians` (supplier JWT). Custodian API keys are managed at the organization level, not per-connection. The supplier registers a custodian by providing `custodian_id`, `account_ref`, and `plaintext_key`. The platform stores the key via `SecretStore` (encrypted, vault ref only stored in DB), calls `CustodianAdapter.validate_key()`, and creates a `CustodianLink` row. Supplier can list all their org's custodian links via `GET /custodians`.
 
 **Acceptance criteria:**
-- [ ] With `CUSTODIAN_ADAPTER=mock`, submitting any non-empty key string returns HTTP 200 and sets connection `status=active`.
-- [ ] The plaintext API key is not present in the HTTP response body.
-- [ ] The plaintext API key is not present in any log line (verified by log capture in test).
-- [ ] `CustodianLink.encrypted_api_key_ref` contains a vault reference string, not the plaintext key.
-- [ ] If `validate_key()` returns `False` (seeded mock failure), the endpoint returns HTTP 422 with `"custodian_key_invalid"` error code and the connection remains `pending`.
-- [ ] Calling with an agent JWT returns HTTP 403.
+- [x] `POST /custodians` with a valid supplier JWT, `custodian_id`, `account_ref`, and `plaintext_key` returns HTTP 201 with `{ "custodian_link_id": "...", "status": "active" }`.
+- [x] The plaintext API key is not present in the HTTP response body.
+- [x] `CustodianLink.encrypted_api_key_ref` contains a vault reference string, not the plaintext key.
+- [x] If `validate_key()` returns `False`, the endpoint returns HTTP 422 with `"custodian_key_invalid"` error code.
+- [x] Calling with an agent JWT returns HTTP 403.
+- [x] `GET /custodians` with a supplier JWT returns all custodian links for the caller's org.
+- [x] Supplier UI at `/dashboard/custodians` lists registered custodians and provides a registration form with a password-type field for the API key.
 
-**Out of scope for this feature:** Key rotation; connection suspension; real Anchorage API validation.
+**Implementation note:** The original F-024 attached a custodian key to an individual connection and used it to transition `accepted → active`. This was redesigned (migration 0010): the connection has no `custodian_link_id` FK, and custodian management is entirely org-level. See TECH_SPEC_M3.md §SD-002.
+
+**Out of scope for this feature:** Key rotation; per-connection custodian assignment; real Anchorage API validation.
 
 ---
 
-### F-025 — Connection management: suspension and termination API
+### F-025 — Connection management: suspension, reactivation, and termination API
 **Milestone:** M2
 **Depends on:** F-024, F-005, F-006
 **Actor(s):** Supplier, Agent
 
-**What it does:** `POST /connections/{id}/suspend` and `POST /connections/{id}/terminate` (supplier or agent JWT, either party may act). On termination, flags all active loans on the connection and sends notifications to both parties, including a warning that the supplier must rotate the custodian key.
+**What it does:** Lifecycle management endpoints for active connections:
+- `POST /connections/{id}/suspend` — transitions `active → suspended` (either party)
+- `POST /connections/{id}/reactivate` — transitions `suspended → active` (either party)
+- `POST /connections/{id}/terminate` — transitions any non-terminated status → `terminated` (either party)
+
+On termination, flags all active loans on the connection and returns their IDs in the response.
 
 **Acceptance criteria:**
-- [ ] Either party (supplier or agent JWT) can call `suspend` and `terminate`.
-- [ ] `suspend` transitions `status` to `suspended`; `terminate` to `terminated`.
-- [ ] Terminating a connection with active loans sets those loans to a `flagged` annotation (or equivalent) and includes the loan IDs in the response body.
-- [ ] A `"connection_terminated_rotate_key"` notification event is logged for the supplier.
-- [ ] Calling `terminate` on an already-terminated connection returns HTTP 409.
+- [x] Either party (supplier or agent JWT) can call `suspend`, `reactivate`, and `terminate`.
+- [x] `suspend` transitions `status` to `suspended`.
+- [x] `reactivate` transitions `status` from `suspended` back to `active`.
+- [x] `terminate` transitions `status` to `terminated`; returns `flagged_loan_ids` list in response body.
+- [x] A `"connection_terminated_rotate_key"` notification event is logged for the supplier.
+- [x] Calling `terminate` on an already-terminated connection returns HTTP 409.
+- [x] Calling `suspend` on a non-active connection returns HTTP 409.
+- [x] Calling `reactivate` on a non-suspended connection returns HTTP 409.
 
 **Out of scope for this feature:** Automatic custodian key revocation; loan resolution after termination.
 
@@ -517,16 +532,15 @@
 **Depends on:** F-024, F-005
 **Actor(s):** Supplier, Agent
 
-**What it does:** `GET /connections` (returns connections for the calling org) and `GET /connections/{id}` (returns detail including status and custodian link status). Access-controlled so each org sees only its own connections.
+**What it does:** `GET /connections` (returns connections for the calling org). Access-controlled so each org sees only its own connections.
 
 **Acceptance criteria:**
-- [ ] `GET /connections` with a supplier JWT returns only connections where `supplier_id = caller.org_id`.
-- [ ] `GET /connections` with an agent JWT returns only connections where `agent_id = caller.org_id`.
-- [ ] `GET /connections/{id}` with a JWT from an org not in the connection returns HTTP 403.
-- [ ] Response includes `status`, `activated_at`, and whether the `custodian_link` is present.
-- [ ] Admin JWT can call `GET /connections` and receives all connections (no filter).
+- [x] `GET /connections` with a supplier JWT returns only connections where `supplier_id = caller.org_id`.
+- [x] `GET /connections` with an agent JWT returns only connections where `agent_id = caller.org_id`.
+- [x] Response includes `connection_id`, `supplier_id`, `agent_id`, `status`, `created_at`, `activated_at`, `pending_agreement`.
+- [x] `pending_agreement: true` when the connection has a `lending_agreement` in `pending_confirmation` status.
 
-**Out of scope for this feature:** Connection UI pages (F-027).
+**Out of scope for this feature:** Connection UI pages (F-027); `GET /connections/{id}` detail endpoint (not yet implemented).
 
 ---
 
@@ -535,17 +549,23 @@
 **Depends on:** F-026, F-010
 **Actor(s):** Supplier, Agent
 
-**What it does:** React pages for: (a) Supplier: send invitation, view pending/active/terminated connections, enter custodian API key; (b) Agent: view pending invitations, accept invitation.
+**What it does:** React pages for: (a) Supplier: send invitation (`/dashboard/connections`), view connections, suspend/reactivate/terminate; (b) Agent: view pending invitations, accept invitation; (c) Both: navigate to agreement page from active connections.
 
 **Acceptance criteria:**
-- [ ] Supplier dashboard lists all connections with their current `status`.
-- [ ] Supplier can click "Invite Agent" → enter agent email → submit → sees new connection in "Pending" state.
-- [ ] After agent accepts, supplier sees a prompt to "Register Custodian Key" with an input field.
-- [ ] Entering the key and submitting shows "Active" status when mock validation succeeds.
-- [ ] Agent dashboard shows pending invitations and an "Accept" button per invitation.
-- [ ] TypeScript compiles with zero errors.
+- [x] Supplier dashboard lists all connections with their current `status` badge.
+- [x] Supplier can click "Invite Agent" → enter agent email or org ID → submit → sees new connection in "Pending" state.
+- [x] Supplier sees "Manage Agreement" button on active connections, linking to the agreement page.
+- [x] Supplier sees `AgreementStatusBadge` ("Pending Confirmation") on connections where `pending_agreement = true`.
+- [x] Supplier can suspend an active connection (confirm dialog → `suspended` status).
+- [x] Supplier can reactivate a suspended connection (`suspended → active`).
+- [x] Supplier can terminate any non-terminated connection (confirm dialog → `terminated` status).
+- [x] Agent dashboard shows all connections with status badges and an "Accept" button on pending connections.
+- [x] Agent accepting a connection transitions it directly to `active` status.
+- [x] Agent sees "Manage Agreement" button on active connections.
+- [x] TypeScript compiles with zero errors.
+- [x] Custodian management moved to dedicated `/dashboard/custodians` page (see F-024).
 
-**Out of scope for this feature:** Connection scope configuration UI (which accounts/assets are in scope); key rotation UI.
+**Out of scope for this feature:** Connection scope configuration UI; key rotation UI.
 
 ---
 
@@ -558,13 +578,16 @@
 **Depends on:** F-021
 **Actor(s):** System
 
-**What it does:** Adds the `lending_agreements` Alembic migration with all columns per the data model: `id`, `connection_id` (FK), `version`, `assets_in_scope` (TEXT[]), `eligible_collateral` (TEXT[]), `initial_ltv_pct`, `margin_call_ltv_pct`, `recall_notice_days`, `max_loan_days`, `day_count_basis` (ENUM: actual_360, actual_365), `agent_fee_bps`, `confirmed_by_supplier_at`, `confirmed_by_agent_at`, `created_at`.
+**What it does:** Adds the `lending_agreements` Alembic migration (0009) with all columns: `id`, `connection_id` (FK → connections ON DELETE RESTRICT), `version`, `assets_in_scope` (TEXT[]), `eligible_collateral` (TEXT[]), `initial_ltv_pct` (NUMERIC 10,4), `margin_call_ltv_pct` (NUMERIC 10,4), `recall_notice_days`, `max_loan_days`, `day_count_basis` (ENUM: actual_360, actual_365), `agent_fee_bps`, `confirmed_by_supplier_at`, `confirmed_by_agent_at`, `created_at`.
+
+`status` (`pending_confirmation` | `active`) is a derived field computed at read time: `active` when both confirmation timestamps are non-null.
 
 **Acceptance criteria:**
-- [ ] `alembic upgrade head` applies cleanly; `downgrade -1` reverses cleanly.
-- [ ] `day_count_basis` enforces the ENUM at DB level.
-- [ ] `connection_id` FK enforces referential integrity.
-- [ ] `version` starts at 1 for a new agreement and increments on each re-confirmation (enforced at application layer, not DB).
+- [x] `alembic upgrade head` applies cleanly; `downgrade -1` reverses cleanly.
+- [x] `day_count_basis` enforces the ENUM at DB level (`day_count_basis_enum`).
+- [x] `connection_id` FK enforces referential integrity (ON DELETE RESTRICT).
+- [x] `version` starts at 1 for a new agreement; increments at the application layer on each amendment.
+- [x] Index on `connection_id` for efficient latest-version lookup.
 
 **Out of scope for this feature:** Agreement API endpoints; confirmation flow.
 
@@ -575,18 +598,22 @@
 **Depends on:** F-028, F-005, F-006
 **Actor(s):** Agent
 
-**What it does:** `POST /connections/{id}/agreement` (agent JWT). Creates a new `LendingAgreement` row with all required terms, `version=1`, and both confirmation timestamps as `NULL`. Sends a notification to the supplier to review and confirm.
+**What it does:** `POST /connections/{id}/agreement` (agent JWT). Creates a new `LendingAgreement` row with all required terms, `version=1` (or `latest.version + 1` if a prior active agreement exists), both confirmation timestamps as `NULL`. Sends a notification to both parties.
 
 **Acceptance criteria:**
-- [ ] `POST /connections/{id}/agreement` with all required fields and an agent JWT returns HTTP 201 with `{ "agreement_id": "...", "version": 1 }`.
-- [ ] Calling with a supplier JWT returns HTTP 403.
-- [ ] Missing any required term returns HTTP 422 with field-level error messages.
-- [ ] `margin_call_ltv_pct` must be greater than `initial_ltv_pct`; violation returns HTTP 422.
-- [ ] `initial_ltv_pct` must be between 0 and 100; violation returns HTTP 422.
-- [ ] A `"agreement_pending_supplier_confirmation"` notification event is logged.
-- [ ] The connection must have `status=active`; submitting on a `pending` connection returns HTTP 409.
+- [x] `POST /connections/{id}/agreement` with all required fields and an agent JWT returns HTTP 201 with the full `AgreementResponse` including `version` and `status: "pending_confirmation"`.
+- [x] Calling with a supplier JWT returns HTTP 403.
+- [x] Missing any required term returns HTTP 422 with field-level error messages.
+- [x] `margin_call_ltv_pct` must be greater than `initial_ltv_pct`; violation returns HTTP 422.
+- [x] `initial_ltv_pct` must be between 0 and 100 (exclusive); violation returns HTTP 422.
+- [x] `agent_fee_bps` must be between 0 and 10000 (inclusive); violation returns HTTP 422.
+- [x] `recall_notice_days` and `max_loan_days` must be ≥ 1; violation returns HTTP 422.
+- [x] A `"agreement_pending_supplier_confirmation"` notification event is logged, with recipients including both agent caller and supplier org's users.
+- [x] The connection must have `status=active`; submitting on a non-active connection returns HTTP 409 with code `connection_not_active`.
+- [x] A pending (unconfirmed) agreement already exists → HTTP 409 with code `pending_agreement_exists`.
+- [x] `initial_ltv_pct` and `margin_call_ltv_pct` are stored as `NUMERIC(10,4)` and serialized as strings in the response to avoid float precision loss.
 
-**Out of scope for this feature:** Supplier confirmation; term changes; PDF extraction.
+**Out of scope for this feature:** Supplier-initiated agreement terms; PDF extraction.
 
 ---
 
@@ -595,35 +622,40 @@
 **Depends on:** F-029, F-005, F-006
 **Actor(s):** Supplier, Agent
 
-**What it does:** `POST /agreements/{id}/confirm` (supplier or agent JWT). Sets `confirmed_by_supplier_at` or `confirmed_by_agent_at` respectively. When both timestamps are set, the agreement is considered active and the program goes live. Notifies the other party on each confirmation.
+**What it does:** `POST /agreements/{id}/confirm` (supplier or agent JWT). Sets `confirmed_by_supplier_at` or `confirmed_by_agent_at` respectively. When both timestamps are set, `status` becomes `active`. Notifies the other party on each confirmation. Only the latest version of an agreement may be confirmed.
 
 **Acceptance criteria:**
-- [ ] Supplier calling `confirm` sets `confirmed_by_supplier_at` to the current timestamp.
-- [ ] Agent calling `confirm` sets `confirmed_by_agent_at` to the current timestamp.
-- [ ] After both parties confirm, `GET /agreements/{id}` returns `status: active` (derived field: both timestamps non-null).
-- [ ] Calling `confirm` on an agreement where the caller has already confirmed returns HTTP 409.
-- [ ] A `"agreement_confirmed_by_supplier"` or `"agreement_confirmed_by_agent"` notification event is logged.
-- [ ] Calling with a JWT from an org not in the connection returns HTTP 403.
+- [x] Supplier calling `confirm` sets `confirmed_by_supplier_at` to the current timestamp; returns the updated `AgreementResponse`.
+- [x] Agent calling `confirm` sets `confirmed_by_agent_at` to the current timestamp; returns the updated `AgreementResponse`.
+- [x] After both parties confirm, response includes `status: "active"` (both timestamps non-null).
+- [x] Calling `confirm` on an agreement where the caller has already confirmed returns HTTP 409 with code `already_confirmed`.
+- [x] Calling `confirm` on a superseded (not latest) version returns HTTP 409 with code `agreement_superseded`.
+- [x] A `"agreement_confirmed_by_supplier"` or `"agreement_confirmed_by_agent"` notification event is logged.
+- [x] Calling with a JWT from an org not in the connection returns HTTP 403.
 
-**Out of scope for this feature:** Agreement re-confirmation after term changes; e-signature.
+**Out of scope for this feature:** E-signature; simultaneous confirmation race handling.
 
 ---
 
 ### F-031 — Agreement term change and re-confirmation flow API
 **Milestone:** M3
 **Depends on:** F-030, F-005, F-006
-**Actor(s):** Supplier, Agent
+**Actor(s):** Agent
 
-**What it does:** `PUT /agreements/{id}` (agent JWT). Creates a new `LendingAgreement` row with `version = previous_version + 1` and both confirmation timestamps as `NULL`. Previous version is retained in the DB. Notifies both parties that re-confirmation is required.
+**What it does:** `PUT /agreements/{id}` (agent JWT). Creates a new `LendingAgreement` row with `version = previous_version + 1` and both confirmation timestamps as `NULL`. Previous version row is NOT modified. Notifies both parties that re-confirmation is required.
 
 **Acceptance criteria:**
-- [ ] `PUT /agreements/{id}` with an agent JWT and at least one changed field returns HTTP 201 with a new `agreement_id` and incremented `version`.
-- [ ] The previous agreement version row is not deleted or modified.
-- [ ] Both `confirmed_by_supplier_at` and `confirmed_by_agent_at` on the new version are `NULL`.
-- [ ] A `"agreement_requires_reconfirmation"` notification event is logged for both parties.
-- [ ] All historical versions are returned by `GET /connections/{id}/agreement/history` ordered by `version` ascending.
+- [x] `PUT /agreements/{id}` with an agent JWT returns HTTP 201 with a new `agreement_id` and incremented `version`.
+- [x] The previous agreement version row is not deleted or modified.
+- [x] Both `confirmed_by_supplier_at` and `confirmed_by_agent_at` on the new version are `NULL`.
+- [x] Calling `PUT` on a non-current (superseded) version returns HTTP 409 with code `agreement_not_current_version`.
+- [x] A `"agreement_requires_reconfirmation"` notification event is logged for both parties.
+- [x] All historical versions returned by `GET /connections/{id}/agreement/history`, ordered by `version ASC`.
+- [x] Calling with a supplier JWT returns HTTP 403.
 
-**Out of scope for this feature:** Automatic blocking of new loan bookings during re-confirmation (deferred to F-038 validation).
+**Implementation note:** The original spec listed "Supplier, Agent" as actors. Only agent JWT is accepted (supplier role is to confirm, not draft). See TECH_SPEC_M3.md §SD-003.
+
+**Out of scope for this feature:** Automatic blocking of new loan bookings during re-confirmation (deferred to F-038).
 
 ---
 
@@ -632,17 +664,72 @@
 **Depends on:** F-027, F-029, F-030, F-031
 **Actor(s):** Supplier, Agent
 
-**What it does:** React pages for: (a) Agent: form to enter all agreement terms for an active connection; (b) Supplier: review terms and click "Confirm"; (c) Both: view current agreement and version history.
+**What it does:** React pages for: (a) Agent: form to enter or amend all agreement terms for an active connection; (b) Supplier: review terms and confirm; (c) Both: read-only view of current agreement and full version history.
+
+**Routes:**
+- `/dashboard/connections/:id/agreement` — `AgreementPage` dispatcher → `SupplierAgreementView` or `AgentAgreementView`
+- `/dashboard/connections/:id/agreement/new` — `AgentAgreementFormPage` (create or amend)
+- `/dashboard/connections/:id/agreement/history` — `AgreementHistoryPage`
 
 **Acceptance criteria:**
-- [ ] Agent can navigate to a connection and click "Enter Agreement Terms", fill the form, and submit.
-- [ ] All numeric fields show inline validation (e.g., LTV must be 0–100, margin call must exceed initial LTV).
-- [ ] Supplier dashboard shows a "Pending Your Confirmation" badge on agreements awaiting supplier action.
-- [ ] Both parties can see the current confirmed agreement terms in a read-only view.
-- [ ] Agreement version history page lists all versions with timestamps.
+- [x] Agent can navigate to an active connection, click "Enter Agreement Terms", fill the form, and submit → redirects to agreement view.
+- [x] All form fields show inline validation: LTV 0–100, margin call must exceed initial LTV, integer fields ≥ 1, bps 0–10000.
+- [x] Amend path: agent opens form pre-populated with current terms, edits, submits → new version created.
+- [x] Supplier view shows "Confirm" button when agreement is `pending_confirmation` and supplier hasn't yet confirmed.
+- [x] Supplier view shows "Awaiting agent confirmation" when supplier has confirmed but agent hasn't.
+- [x] Supplier dashboard connection row shows `AgreementStatusBadge` ("Pending Confirmation") when `pending_agreement = true`.
+- [x] Both parties see the current agreement in a read-only card after dual confirmation.
+- [x] Agreement history page lists all versions with `version` number, `status`, and `created_at` timestamp.
+- [x] TypeScript compiles with zero errors.
+
+**Open item:** Supplier cannot currently initiate agreement terms — only agents can (see TECH_SPEC_M3.md §4 Open issue).
+
+**Out of scope for this feature:** PDF upload; e-signature widget; supplier-proposed terms.
+
+---
+
+### F-061 — Connection inventory scope: supplier publishes lendable quantity
+**Milestone:** M2
+**Depends on:** F-021, F-024, F-008
+**Actor(s):** Supplier
+
+**What it does:** The supplier's custodian holds their total asset balance across one or more asset types. Before loans can be booked against a connection, the supplier must explicitly declare how much of that balance is available to lend through that specific agent relationship. This is called the **published inventory allocation**.
+
+For each active connection, the supplier sets a per-asset quantity cap stored in `connections.inventory_scope` as a JSONB map of asset type → quantity (e.g., `{"BTC": 100.0, "ETH": 50.0}`). Any asset type is valid. The platform computes the **effective available quantity** for each asset as `min(custodian_balance_for_asset, published_quantity_for_connection)`. The agent sees only the effective available quantity, never the supplier's total custodian balance.
+
+The supplier can update the allocation at any time. If the custodian balance drops below the published quantity, the effective available quantity follows the custodian balance downward; the platform does not automatically raise it back.
+
+**Endpoints:**
+- `PUT /connections/{id}/inventory-scope` (supplier JWT) — set or update the per-asset published quantities for this connection
+- `GET /connections/{id}/inventory` (supplier or agent JWT):
+  - Supplier: `{ "asset_type": { "custodian_balance": 500.0, "published_quantity": 100.0, "effective_available": 100.0 }, ... }`
+  - Agent: `{ "asset_type": { "effective_available": 100.0 }, ... }` (custodian balance hidden)
+
+**Database change:** Add `inventory_scope JSONB NOT NULL DEFAULT '{}'` to the `connections` table in a new migration.
+
+**Loan booking integration (F-035 extension):**
+- If `inventory_scope` has no entry for the booked asset type → HTTP 422, code `"no_inventory_published"`
+- If `loan.quantity > (published_quantity − already_booked_quantity)` for that asset → HTTP 422, code `"exceeds_published_inventory"`
+- Already-booked active and pending loans count against published quantity; only remaining published quantity is available.
+
+**Acceptance criteria:**
+- [ ] `PUT /connections/{id}/inventory-scope` with a supplier JWT and any valid asset-type/quantity map returns HTTP 200 with the updated scope.
+- [ ] Calling `PUT` with an agent JWT returns HTTP 403.
+- [ ] `GET /connections/{id}/inventory` with a supplier JWT returns both `custodian_balance` and `published_quantity` per asset.
+- [ ] `GET /connections/{id}/inventory` with an agent JWT returns only `effective_available` per asset; `custodian_balance` is absent from the response.
+- [ ] If `inventory_scope` has no entry for an asset type, booking a loan for that asset returns HTTP 422 with code `"no_inventory_published"`.
+- [ ] Booking where `quantity > effective_available − already_booked` returns HTTP 422 with code `"exceeds_published_inventory"`.
+- [ ] Booking within the remaining published allocation succeeds.
+- [ ] Setting an asset's published quantity to 0 blocks new bookings for that asset but does not affect active loans.
 - [ ] TypeScript compiles with zero errors.
 
-**Out of scope for this feature:** PDF upload; e-signature widget.
+**Impact on related features:**
+- F-026 connection list: include `inventory_scope` in `ConnectionResponse` for supplier callers.
+- F-027 connection UI: supplier connection detail shows published quantities per asset with an "Edit" control; agent connection detail shows only effective available per asset.
+- F-035 loan booking: add the two new validation checks described above.
+- F-044 portfolio risk metrics: denominate `concentration_by_borrower` percentage against published quantity, not custodian total.
+
+**Out of scope for this feature:** Real-time inventory broadcast to the agent; automatic rebalancing of published quantity when custodian balance changes; per-loan earmarking at the custodian.
 
 ---
 
@@ -1167,7 +1254,7 @@
 |---|---|
 | M0 — Foundation | F-001, F-002, F-003, F-004, F-005, F-006, F-007, F-008, F-009, F-010, F-060 |
 | M1 — Onboarding | F-011, F-012, F-013, F-014, F-015, F-016, F-017, F-018, F-019, F-058 |
-| M2 — Connection | F-020, F-021, F-022, F-023, F-024, F-025, F-026, F-027 |
+| M2 — Connection | F-020, F-021, F-022, F-023, F-024, F-025, F-026, F-027, F-061 |
 | M3 — Agreement | F-028, F-029, F-030, F-031, F-032 |
 | M4 — Loan lifecycle | F-033, F-034, F-035, F-036, F-037, F-038, F-039, F-040, F-041, F-042 |
 | M5 — Risk monitoring | F-043, F-044, F-045, F-046, F-047, F-048 |

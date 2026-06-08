@@ -28,12 +28,14 @@ from app.repositories.borrower_repository import BorrowerRepository
 from app.repositories.custodian_link_repository import CustodianLinkRepository
 from app.repositories.connection_repository import ConnectionRepository
 from app.repositories.agreement_repository import AgreementRepository
+from app.repositories.loan_repository import ApprovedBorrowerRepository, LoanRepository, LoanTransitionRepository
 from app.services.auth_service import AuthService
 from app.services.org_service import OrgService
 from app.services.borrower_service import BorrowerService
 from app.services.connection_service import ConnectionService
 from app.services.agreement_service import AgreementService
 from app.services.custodian_service import CustodianService
+from app.services.loan_service import LoanService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -143,5 +145,29 @@ def get_agreement_service(session: SessionDep) -> AgreementService:
         agreements=AgreementRepository(session),
         connections=ConnectionRepository(session),
         users=UserRepository(session),
+        notifier=notifier,
+    )
+
+
+# ---- loan service ----
+
+
+def get_loan_service(
+    session: SessionDep,
+    custodian_adapter: CustodianAdapter = Depends(get_custodian_adapter),
+    market_data_adapter: MarketDataAdapter = Depends(get_market_data_adapter),
+) -> LoanService:
+    notifier = ConsoleNotificationAdapter(NotificationRepository(session))
+    return LoanService(
+        loans=LoanRepository(session),
+        approved_borrowers=ApprovedBorrowerRepository(session),
+        transitions=LoanTransitionRepository(session),
+        borrowers=BorrowerRepository(session),
+        connections=ConnectionRepository(session),
+        agreements=AgreementRepository(session),
+        custodian_links=CustodianLinkRepository(session),
+        users=UserRepository(session),
+        custodian=custodian_adapter,
+        market_data=market_data_adapter,
         notifier=notifier,
     )

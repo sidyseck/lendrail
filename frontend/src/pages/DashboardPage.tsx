@@ -5,6 +5,7 @@ export function DashboardPage() {
   const { role, logout } = useAuth();
   const location = useLocation();
   const onConnections = location.pathname.startsWith('/dashboard/connections');
+  const onLoans = location.pathname.startsWith('/dashboard/loans');
   const onOrganization = location.pathname.startsWith('/dashboard/organization');
   const onCustodians = location.pathname.startsWith('/dashboard/custodians');
 
@@ -21,6 +22,14 @@ export function DashboardPage() {
             >
               Connections
             </Link>
+            {(role === 'supplier' || role === 'agent') && (
+              <Link
+                to="/dashboard/loans"
+                className={`text-sm ${onLoans ? 'font-semibold text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}
+              >
+                Loans
+              </Link>
+            )}
             <Link
               to="/dashboard/organization"
               className={`text-sm ${onOrganization ? 'font-semibold text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}

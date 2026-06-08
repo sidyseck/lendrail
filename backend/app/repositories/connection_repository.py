@@ -4,6 +4,7 @@ from sqlalchemy import or_, select
 
 from app.db.repository import BaseRepository
 from app.models.connection import Connection
+from app.models.loan import Loan
 
 
 class ConnectionRepository(BaseRepository[Connection]):
@@ -42,10 +43,11 @@ class ConnectionRepository(BaseRepository[Connection]):
         return list(result.scalars().all())
 
     async def list_active_loans_by_connection(self, connection_id: UUID) -> list[UUID]:
-        """Stub: return active loans for a connection.
-
-        The loans table does not exist in M2. This method returns an empty list
-        as a deliberate no-op stub. M4 will replace this with a real query
-        against the loans table once it exists (F-033).
-        """
-        return []  # M4 gate: wire real loan query
+        """Return non-terminal loans that should be flagged when a connection ends."""
+        result = await self.session.execute(
+            select(Loan.id).where(
+                Loan.connection_id == connection_id,
+                Loan.state.in_(["pending", "active", "margin_call", "recall_initiated"]),
+            )
+        )
+        return list(result.scalars().all())
