@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(curl -s http://localhost:8000/openapi.json)",
-      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(list\\(d['paths'].keys\\(\\)\\)\\)\")"
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(list\\(d['paths'].keys\\(\\)\\)\\)\")",
+      "Bash(curl -s http://localhost:8000/healthz)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\([p for p in d['paths'].keys\\(\\) if 'custodian' in p or 'connection' in p]\\)\")",
+      "Bash(npx vitest *)"
     ]
   }
 }

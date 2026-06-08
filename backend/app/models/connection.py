@@ -32,18 +32,10 @@ class Connection(Base):
         index=True,
     )
     status: Mapped[str] = mapped_column(
-        sa.Enum("pending", "accepted", "active", "suspended", "terminated",
+        sa.Enum("pending", "active", "suspended", "terminated",
                 name="connection_status_enum", create_type=False),
         nullable=False,
         server_default="pending",
-    )
-    # Null until supplier registers API key (F-024).
-    custodian_link_id: Mapped[uuid.UUID | None] = mapped_column(
-        PgUUID(as_uuid=True),
-        ForeignKey("custodian_links.id",
-                   name="fk_connections_custodian_link_id_custodian_links",
-                   ondelete="SET NULL"),
-        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

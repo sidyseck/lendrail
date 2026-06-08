@@ -33,6 +33,7 @@ from app.services.org_service import OrgService
 from app.services.borrower_service import BorrowerService
 from app.services.connection_service import ConnectionService
 from app.services.agreement_service import AgreementService
+from app.services.custodian_service import CustodianService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -112,19 +113,24 @@ def get_borrower_service(session: SessionDep) -> BorrowerService:
 # ---- connection service ----
 
 
-def get_connection_service(
-    session: SessionDep,
-    secret_store: SecretStore = Depends(get_secret_store),
-    custodian_adapter: CustodianAdapter = Depends(get_custodian_adapter),
-) -> ConnectionService:
+def get_connection_service(session: SessionDep) -> ConnectionService:
     notifier = ConsoleNotificationAdapter(NotificationRepository(session))
     return ConnectionService(
         connections=ConnectionRepository(session),
-        custodian_links=CustodianLinkRepository(session),
         orgs=OrgRepository(session),
+        notifier=notifier,
+    )
+
+
+def get_custodian_service(
+    session: SessionDep,
+    secret_store: SecretStore = Depends(get_secret_store),
+    custodian_adapter: CustodianAdapter = Depends(get_custodian_adapter),
+) -> CustodianService:
+    return CustodianService(
+        custodian_links=CustodianLinkRepository(session),
         secret_store=secret_store,
         custodian_adapter=custodian_adapter,
-        notifier=notifier,
     )
 
 

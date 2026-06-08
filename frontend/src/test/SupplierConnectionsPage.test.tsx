@@ -183,285 +183,80 @@ describe('SupplierConnectionsPage', () => {
     expect(screen.getByRole('dialog', { name: /invite agent/i })).toBeInTheDocument();
   });
 
-  // ── Register Custodian Key ───────────────────────────────────────────────────
+  // ── Reactivate ──────────────────────────────────────────────────────────────
 
-  it('shows "Register Custodian Key" button only for accepted connections', async () => {
+  it('shows Reactivate button only for suspended connections', async () => {
     server.use(
       http.get('/api/connections', () =>
         HttpResponse.json({
           connections: [
             {
-              connection_id: 'conn-accepted',
+              connection_id: 'conn-suspended',
               supplier_id: 'org-001',
               agent_id: 'org-002',
-              status: 'accepted',
-              custodian_link_present: false,
-              created_at: '2026-06-08T00:00:00Z',
-              activated_at: null,
-            },
-          ],
-        }),
-      ),
-    );
-    renderPage();
-    await waitFor(() => {
-      expect(
-        screen.getByRole('button', { name: /register custodian key/i }),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it('does not show "Register Custodian Key" for pending connections', async () => {
-    renderPage();
-    await waitFor(() => screen.getByText('pending'));
-    expect(
-      screen.queryByRole('button', { name: /register custodian key/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  it('does not show "Register Custodian Key" for active or suspended connections', async () => {
-    server.use(
-      http.get('/api/connections', () =>
-        HttpResponse.json({
-          connections: [
-            {
-              connection_id: 'conn-active',
-              supplier_id: 'org-001',
-              agent_id: 'org-002',
-              status: 'active',
-              custodian_link_present: true,
+              status: 'suspended',
               created_at: '2026-06-01T00:00:00Z',
               activated_at: '2026-06-02T00:00:00Z',
             },
             {
-              connection_id: 'conn-suspended',
+              connection_id: 'conn-active',
               supplier_id: 'org-001',
               agent_id: 'org-003',
-              status: 'suspended',
-              custodian_link_present: false,
+              status: 'active',
               created_at: '2026-06-01T00:00:00Z',
-              activated_at: null,
+              activated_at: '2026-06-02T00:00:00Z',
             },
           ],
         }),
       ),
     );
     renderPage();
-    await waitFor(() => screen.getByText('active'));
-    expect(
-      screen.queryByRole('button', { name: /register custodian key/i }),
-    ).not.toBeInTheDocument();
+    await waitFor(() => screen.getByText('suspended'));
+    expect(screen.getByRole('button', { name: /reactivate/i })).toBeInTheDocument();
+    // active connection should not show Reactivate
+    expect(screen.getAllByRole('button', { name: /reactivate/i })).toHaveLength(1);
   });
 
-  it('opens register key modal when "Register Custodian Key" is clicked', async () => {
+  it('calls reactivate endpoint and updates status to "active"', async () => {
     const user = userEvent.setup();
+    // Override GET to return a suspended connection, then active after refetch
+    let callCount = 0;
     server.use(
-      http.get('/api/connections', () =>
-        HttpResponse.json({
+      http.get('/api/connections', () => {
+        callCount++;
+        const status = callCount === 1 ? 'suspended' : 'active';
+        return HttpResponse.json({
           connections: [
             {
-              connection_id: 'conn-accepted',
+              connection_id: 'conn-susp',
               supplier_id: 'org-001',
               agent_id: 'org-002',
-              status: 'accepted',
-              custodian_link_present: false,
-              created_at: '2026-06-08T00:00:00Z',
-              activated_at: null,
+              status,
+              created_at: '2026-06-01T00:00:00Z',
+              activated_at: '2026-06-02T00:00:00Z',
             },
           ],
-        }),
-      ),
-    );
-    renderPage();
-    await waitFor(() =>
-      screen.getByRole('button', { name: /register custodian key/i }),
-    );
-    await user.click(screen.getByRole('button', { name: /register custodian key/i }));
-    expect(
-      screen.getByRole('dialog', { name: /register custodian key/i }),
-    ).toBeInTheDocument();
-  });
-
-  it('plaintext_key input has type="password"', async () => {
-    const user = userEvent.setup();
-    server.use(
-      http.get('/api/connections', () =>
-        HttpResponse.json({
-          connections: [
-            {
-              connection_id: 'conn-accepted',
-              supplier_id: 'org-001',
-              agent_id: 'org-002',
-              status: 'accepted',
-              custodian_link_present: false,
-              created_at: '2026-06-08T00:00:00Z',
-              activated_at: null,
-            },
-          ],
-        }),
-      ),
-    );
-    renderPage();
-    await waitFor(() =>
-      screen.getByRole('button', { name: /register custodian key/i }),
-    );
-    await user.click(screen.getByRole('button', { name: /register custodian key/i }));
-    const apiKeyInput = screen.getByLabelText(/api key/i);
-    expect(apiKeyInput).toHaveAttribute('type', 'password');
-  });
-
-  it('transitions connection to "active" after successful key registration', async () => {
-    const user = userEvent.setup();
-    server.use(
-      http.get('/api/connections', () =>
-        HttpResponse.json({
-          connections: [
-            {
-              connection_id: 'conn-accepted',
-              supplier_id: 'org-001',
-              agent_id: 'org-002',
-              status: 'accepted',
-              custodian_link_present: false,
-              created_at: '2026-06-08T00:00:00Z',
-              activated_at: null,
-            },
-          ],
-        }),
-      ),
-    );
-    server.use(
-      http.post('/api/connections/conn-accepted/custodian-key', () =>
+        });
+      }),
+      http.post('/api/connections/conn-susp/reactivate', () =>
         HttpResponse.json(
           {
-            connection_id: 'conn-accepted',
+            connection_id: 'conn-susp',
             supplier_id: 'org-001',
             agent_id: 'org-002',
             status: 'active',
-            custodian_link_present: true,
-            created_at: '2026-06-08T00:00:00Z',
-            activated_at: '2026-06-08T01:00:00Z',
+            created_at: '2026-06-01T00:00:00Z',
+            activated_at: '2026-06-02T00:00:00Z',
           },
           { status: 200 },
         ),
       ),
     );
-    // After key registration, the list refetch should show active
-    let callCount = 0;
-    server.use(
-      http.get('/api/connections', () => {
-        callCount++;
-        if (callCount === 1) {
-          return HttpResponse.json({
-            connections: [
-              {
-                connection_id: 'conn-accepted',
-                supplier_id: 'org-001',
-                agent_id: 'org-002',
-                status: 'accepted',
-                custodian_link_present: false,
-                created_at: '2026-06-08T00:00:00Z',
-                activated_at: null,
-              },
-            ],
-          });
-        }
-        return HttpResponse.json({
-          connections: [
-            {
-              connection_id: 'conn-accepted',
-              supplier_id: 'org-001',
-              agent_id: 'org-002',
-              status: 'active',
-              custodian_link_present: true,
-              created_at: '2026-06-08T00:00:00Z',
-              activated_at: '2026-06-08T01:00:00Z',
-            },
-          ],
-        });
-      }),
-    );
     renderPage();
-    await waitFor(() =>
-      screen.getByRole('button', { name: /register custodian key/i }),
-    );
-    await user.click(screen.getByRole('button', { name: /register custodian key/i }));
-    await user.type(screen.getByLabelText(/custodian id/i), 'mock');
-    await user.type(screen.getByLabelText(/account reference/i), 'acct-001');
-    await user.type(screen.getByLabelText(/api key/i), 'secret-key-123');
-    await user.click(screen.getByRole('button', { name: /register key/i }));
-    await waitFor(() => {
-      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    });
+    await waitFor(() => screen.getByRole('button', { name: /reactivate/i }));
+    await user.click(screen.getByRole('button', { name: /reactivate/i }));
     await waitFor(() => {
       expect(screen.getByText('active')).toBeInTheDocument();
-    });
-  });
-
-  it('shows custodian_key_invalid error inside modal on 422 response', async () => {
-    const user = userEvent.setup();
-    server.use(
-      http.get('/api/connections', () =>
-        HttpResponse.json({
-          connections: [
-            {
-              connection_id: 'conn-key-invalid',
-              supplier_id: 'org-001',
-              agent_id: 'org-002',
-              status: 'accepted',
-              custodian_link_present: false,
-              created_at: '2026-06-08T00:00:00Z',
-              activated_at: null,
-            },
-          ],
-        }),
-      ),
-    );
-    renderPage();
-    await waitFor(() =>
-      screen.getByRole('button', { name: /register custodian key/i }),
-    );
-    await user.click(screen.getByRole('button', { name: /register custodian key/i }));
-    await user.type(screen.getByLabelText(/custodian id/i), 'mock');
-    await user.type(screen.getByLabelText(/account reference/i), 'acct-001');
-    await user.type(screen.getByLabelText(/api key/i), 'bad-key');
-    await user.click(screen.getByRole('button', { name: /register key/i }));
-    await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent(/rejected by custodian/i);
-    });
-  });
-
-  it('does not show plaintext_key value in any rendered text after submission', async () => {
-    const user = userEvent.setup();
-    server.use(
-      http.get('/api/connections', () =>
-        HttpResponse.json({
-          connections: [
-            {
-              connection_id: 'conn-accepted',
-              supplier_id: 'org-001',
-              agent_id: 'org-002',
-              status: 'accepted',
-              custodian_link_present: false,
-              created_at: '2026-06-08T00:00:00Z',
-              activated_at: null,
-            },
-          ],
-        }),
-      ),
-    );
-    renderPage();
-    await waitFor(() =>
-      screen.getByRole('button', { name: /register custodian key/i }),
-    );
-    await user.click(screen.getByRole('button', { name: /register custodian key/i }));
-    const secretValue = 'super-secret-api-key-xyz';
-    await user.type(screen.getByLabelText(/custodian id/i), 'mock');
-    await user.type(screen.getByLabelText(/account reference/i), 'acct-001');
-    await user.type(screen.getByLabelText(/api key/i), secretValue);
-    await user.click(screen.getByRole('button', { name: /register key/i }));
-    // After any action, verify the key value doesn't appear as visible text
-    await waitFor(() => {
-      expect(screen.queryByText(secretValue)).not.toBeInTheDocument();
     });
   });
 
@@ -484,7 +279,6 @@ describe('SupplierConnectionsPage', () => {
               supplier_id: 'org-001',
               agent_id: 'org-002',
               status: 'pending',
-              custodian_link_present: false,
               created_at: '2026-06-08T00:00:00Z',
               activated_at: null,
             },
@@ -568,7 +362,6 @@ describe('SupplierConnectionsPage', () => {
               supplier_id: 'org-001',
               agent_id: 'org-002',
               status: 'terminated',
-              custodian_link_present: false,
               created_at: '2026-06-08T00:00:00Z',
               activated_at: null,
             },

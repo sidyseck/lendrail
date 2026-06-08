@@ -10,6 +10,7 @@ import { OrganizationManagementPage } from './pages/OrganizationManagementPage';
 import { AgreementPage } from './pages/agreements/AgreementPage';
 import { AgentAgreementFormPage } from './pages/agreements/AgentAgreementFormPage';
 import { AgreementHistoryPage } from './pages/agreements/AgreementHistoryPage';
+import { CustodiansPage } from './pages/CustodiansPage';
 
 export default function App() {
   return (
@@ -37,6 +38,8 @@ export default function App() {
             <Route path="connections/:connectionId/agreement" element={<AgreementPage />} />
             <Route path="connections/:connectionId/agreement/new" element={<AgentAgreementFormPage />} />
             <Route path="connections/:connectionId/agreement/history" element={<AgreementHistoryPage />} />
+            {/* Supplier-only custodian management */}
+            <Route path="custodians" element={<CustodiansPage />} />
           </Route>
 
           {/* Default redirect */}

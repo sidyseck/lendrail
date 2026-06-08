@@ -11,14 +11,12 @@ from app.schemas.connections import (
     ConnectionResponse,
     InviteConnectionRequest,
     InviteUnknownAgentResponse,
-    RegisterCustodianKeyRequest,
     TerminateResponse,
 )
 from app.services.agreement_service import AgreementService
 from app.services.connection_service import (
     ConnectionService,
     InviteConnectionInput,
-    RegisterCustodianKeyInput,
 )
 
 router = APIRouter(prefix="/connections", tags=["connections"])
@@ -30,7 +28,6 @@ def _to_response(result) -> ConnectionResponse:
         supplier_id=result.supplier_id,
         agent_id=result.agent_id,
         status=result.status,
-        custodian_link_present=result.custodian_link_id is not None,
         created_at=result.created_at,
         activated_at=result.activated_at,
         pending_agreement=result.pending_agreement,
@@ -60,16 +57,6 @@ async def invite(
     caller: AuthUser = Depends(require_role("supplier")),
     svc: ConnectionService = Depends(get_connection_service),
 ):
-    """
-    Requires supplier JWT.
-
-    If agent_org_id is provided and the agent is known:
-    - Returns HTTP 201 with ConnectionResponse, status="pending".
-
-    If agent_email is provided and the agent is not yet registered:
-    - Returns HTTP 202 with InviteUnknownAgentResponse.
-    - A 'connection_invite_to_unknown' notification event is logged.
-    """
     result, known = await svc.invite(
         caller=caller,
         data=InviteConnectionInput(
@@ -94,51 +81,14 @@ async def invite(
     "/{connection_id}/accept",
     response_model=ConnectionResponse,
     status_code=status.HTTP_200_OK,
-    summary="Agent accepts a pending connection invitation",
+    summary="Agent accepts a pending connection invitation — connection becomes active",
 )
 async def accept(
     connection_id: uuid.UUID,
     caller: AuthUser = Depends(require_role("agent")),
     svc: ConnectionService = Depends(get_connection_service),
 ) -> ConnectionResponse:
-    """
-    Requires agent JWT. Agent must be the named agent on the connection.
-
-    Transitions status: pending → accepted.
-    """
     result = await svc.accept(caller=caller, connection_id=connection_id)
-    return _to_response(result)
-
-
-# ── F-024 ─────────────────────────────────────────────────────────────────────
-
-@router.post(
-    "/{connection_id}/custodian-key",
-    response_model=ConnectionResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Supplier registers custodian API key for a connection",
-)
-async def register_custodian_key(
-    connection_id: uuid.UUID,
-    body: RegisterCustodianKeyRequest,
-    caller: AuthUser = Depends(require_role("supplier")),
-    svc: ConnectionService = Depends(get_connection_service),
-) -> ConnectionResponse:
-    """
-    Requires supplier JWT. Supplier must own the connection (supplier_id match).
-
-    The plaintext_key is passed to SecretStore and then to CustodianAdapter.validate_key().
-    It is NEVER returned in the response body. It is NEVER written to any log line.
-    """
-    result = await svc.register_custodian_key(
-        caller=caller,
-        connection_id=connection_id,
-        data=RegisterCustodianKeyInput(
-            custodian_id=body.custodian_id,
-            account_ref=body.account_ref,
-            plaintext_key=body.plaintext_key,
-        ),
-    )
     return _to_response(result)
 
 
@@ -155,10 +105,22 @@ async def suspend(
     caller: AuthUser = Depends(get_current_user),
     svc: ConnectionService = Depends(get_connection_service),
 ) -> ConnectionResponse:
-    """
-    Requires supplier or agent JWT. Either party may suspend.
-    """
     result = await svc.suspend(caller=caller, connection_id=connection_id)
+    return _to_response(result)
+
+
+@router.post(
+    "/{connection_id}/reactivate",
+    response_model=ConnectionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reactivate a suspended connection (supplier or agent)",
+)
+async def reactivate(
+    connection_id: uuid.UUID,
+    caller: AuthUser = Depends(get_current_user),
+    svc: ConnectionService = Depends(get_connection_service),
+) -> ConnectionResponse:
+    result = await svc.reactivate(caller=caller, connection_id=connection_id)
     return _to_response(result)
 
 
@@ -175,13 +137,6 @@ async def terminate(
     caller: AuthUser = Depends(get_current_user),
     svc: ConnectionService = Depends(get_connection_service),
 ) -> TerminateResponse:
-    """
-    Requires supplier or agent JWT. Either party may terminate.
-
-    On termination, all active loans associated with this connection are flagged
-    (no-op in M2 — loans table added in M4). The supplier is alerted to rotate
-    the custodian API key at the custodian; the platform cannot revoke it.
-    """
     result = await svc.terminate(caller=caller, connection_id=connection_id)
     return TerminateResponse(
         connection_id=result.connection_id,
@@ -203,11 +158,6 @@ async def list_connections(
     svc: ConnectionService = Depends(get_connection_service),
     agreement_svc: AgreementService = Depends(get_agreement_service),
 ) -> ConnectionListResponse:
-    """
-    Supplier: returns connections where supplier_id = caller.org_id.
-    Agent: returns connections where agent_id = caller.org_id.
-    Admin: returns all connections.
-    """
     result = await svc.list_for_org(caller=caller)
     responses = [
         await _with_pending_agreement(r, agreement_svc)
@@ -230,9 +180,5 @@ async def get_connection(
     svc: ConnectionService = Depends(get_connection_service),
     agreement_svc: AgreementService = Depends(get_agreement_service),
 ) -> ConnectionResponse:
-    """
-    Caller must be a party to the connection (supplier_id or agent_id match),
-    or be an admin.
-    """
     result = await svc.get_detail(caller=caller, connection_id=connection_id)
     return await _with_pending_agreement(result, agreement_svc)

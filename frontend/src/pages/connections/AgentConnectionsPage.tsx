@@ -95,9 +95,9 @@ export function AgentConnectionsPage() {
                   {conn.status === 'active' && (
                     <Link
                       to={`/dashboard/connections/${conn.connection_id}/agreement`}
-                      className="text-xs text-blue-600 hover:underline"
+                      className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 inline-block"
                     >
-                      Agreement
+                      Manage Agreement
                     </Link>
                   )}
                 </td>

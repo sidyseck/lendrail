@@ -1,7 +1,7 @@
 """FastAPI application factory."""
 from fastapi import FastAPI
 
-from app.api.routers import auth, health, orgs, borrowers, connections, agreements
+from app.api.routers import auth, health, orgs, borrowers, connections, agreements, custodians
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 
@@ -21,6 +21,7 @@ def create_app() -> FastAPI:
     app.include_router(orgs.router)
     app.include_router(borrowers.router)
     app.include_router(connections.router)
+    app.include_router(custodians.router)
     app.include_router(agreements.router)
 
     @app.on_event("startup")

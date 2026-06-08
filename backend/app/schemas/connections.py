@@ -30,13 +30,6 @@ class InviteConnectionRequest(BaseModel):
         return self
 
 
-class RegisterCustodianKeyRequest(BaseModel):
-    custodian_id: str = Field(..., min_length=1, max_length=64)
-    account_ref: str = Field(..., min_length=1, max_length=255)
-    # plaintext_key: never logged or returned. Min length 1 to prevent empty string submission.
-    plaintext_key: str = Field(..., min_length=1, max_length=1024)
-
-
 # ── Response models ───────────────────────────────────────────────────────────
 
 class ConnectionResponse(BaseModel):
@@ -44,7 +37,6 @@ class ConnectionResponse(BaseModel):
     supplier_id: UUID
     agent_id: UUID
     status: str
-    custodian_link_present: bool     # True if custodian_link_id is not None
     created_at: str                  # ISO-8601
     activated_at: str | None         # ISO-8601 or null
     pending_agreement: bool = False  # True if latest agreement is pending confirmation (M3)

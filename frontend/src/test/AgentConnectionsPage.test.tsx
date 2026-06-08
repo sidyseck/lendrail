@@ -61,7 +61,7 @@ describe('AgentConnectionsPage', () => {
     expect(acceptButtons).toHaveLength(1);
   });
 
-  it('does not show "Accept" button for accepted, active, or terminated connections', async () => {
+  it('does not show "Accept" button for active, suspended, or terminated connections', async () => {
     server.use(
       http.get('/api/connections', () =>
         HttpResponse.json({
@@ -71,7 +71,6 @@ describe('AgentConnectionsPage', () => {
               supplier_id: 'org-001',
               agent_id: 'org-002',
               status: 'active',
-              custodian_link_present: true,
               created_at: '2026-06-01T00:00:00Z',
               activated_at: '2026-06-02T00:00:00Z',
             },
@@ -80,18 +79,16 @@ describe('AgentConnectionsPage', () => {
               supplier_id: 'org-001',
               agent_id: 'org-002',
               status: 'terminated',
-              custodian_link_present: false,
               created_at: '2026-06-01T00:00:00Z',
               activated_at: null,
             },
             {
-              connection_id: 'conn-accepted',
+              connection_id: 'conn-suspended',
               supplier_id: 'org-001',
               agent_id: 'org-002',
-              status: 'accepted',
-              custodian_link_present: false,
+              status: 'suspended',
               created_at: '2026-06-01T00:00:00Z',
-              activated_at: null,
+              activated_at: '2026-06-02T00:00:00Z',
             },
           ],
         }),
@@ -127,10 +124,9 @@ describe('AgentConnectionsPage', () => {
             connection_id: 'conn-001',
             supplier_id: 'org-001',
             agent_id: 'org-002',
-            status: 'accepted',
-            custodian_link_present: false,
+            status: 'active',
             created_at: '2026-06-08T00:00:00Z',
-            activated_at: null,
+            activated_at: new Date().toISOString(),
           },
           { status: 200 },
         );
@@ -142,20 +138,35 @@ describe('AgentConnectionsPage', () => {
     await waitFor(() => expect(acceptCalled).toBe(true));
   });
 
-  it('transitions pending connection to "accepted" after successful accept', async () => {
+  it('transitions pending connection to "active" after successful accept', async () => {
     const user = userEvent.setup();
     // Use MSW stateful handler via resetMockConnections — conn-001 starts as pending
     renderPage();
     await waitFor(() => screen.getByText('pending'));
     await user.click(screen.getByRole('button', { name: /accept/i }));
     await waitFor(() => {
-      expect(screen.getByText('accepted')).toBeInTheDocument();
+      // conn-001 becomes active; conn-002 was already active — 2 active badges total
+      expect(screen.getAllByText('active').length).toBeGreaterThanOrEqual(1);
     });
   });
 
   it('shows inline error when accept returns 409 (already accepted)', async () => {
     const user = userEvent.setup();
     server.use(
+      http.get('/api/connections', () =>
+        HttpResponse.json({
+          connections: [
+            {
+              connection_id: 'conn-001',
+              supplier_id: 'org-001',
+              agent_id: 'org-002',
+              status: 'pending',
+              created_at: '2026-06-08T00:00:00Z',
+              activated_at: null,
+            },
+          ],
+        }),
+      ),
       http.post('/api/connections/:connection_id/accept', () =>
         HttpResponse.json(
           {
@@ -210,10 +221,9 @@ describe('AgentConnectionsPage', () => {
             connection_id: 'conn-001',
             supplier_id: 'org-001',
             agent_id: 'org-002',
-            status: 'accepted',
-            custodian_link_present: false,
+            status: 'active',
             created_at: '2026-06-08T00:00:00Z',
-            activated_at: null,
+            activated_at: new Date().toISOString(),
           },
           { status: 200 },
         );

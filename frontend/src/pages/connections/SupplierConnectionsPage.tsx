@@ -196,163 +196,6 @@ function InviteModal({ onClose, onSuccess201, onSuccess202 }: InviteModalProps) 
   );
 }
 
-// ── RegisterKeyModal ──────────────────────────────────────────────────────────
-
-interface RegisterKeyModalProps {
-  connection: Connection;
-  onClose: () => void;
-  onSuccess: () => void;
-}
-
-function RegisterKeyModal({ connection, onClose, onSuccess }: RegisterKeyModalProps) {
-  const [custodianId, setCustodianId] = useState('');
-  const [accountRef, setAccountRef] = useState('');
-  const [plaintextKey, setPlaintextKey] = useState('');
-  const [validationError, setValidationError] = useState<string | null>(null);
-  const { execute, isLoading: actionLoading, error: actionError, clearError } =
-    useConnectionAction<void>();
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setValidationError(null);
-    clearError();
-
-    if (!custodianId.trim()) {
-      setValidationError('Custodian ID is required.');
-      return;
-    }
-    if (!accountRef.trim()) {
-      setValidationError('Account Reference is required.');
-      return;
-    }
-    if (!plaintextKey.trim()) {
-      setValidationError('API Key is required.');
-      return;
-    }
-
-    await execute(async () => {
-      const response = await fetch(
-        `${API_BASE}/connections/${connection.connection_id}/custodian-key`,
-        {
-          method: 'POST',
-          headers: authHeaders(),
-          body: JSON.stringify({
-            custodian_id: custodianId,
-            account_ref: accountRef,
-            plaintext_key: plaintextKey,
-          }),
-        },
-      );
-
-      if (response.ok) {
-        onSuccess();
-        return;
-      }
-
-      const errBody = (await response.json().catch(() => null)) as {
-        error?: { code?: string; message?: string };
-      } | null;
-      const code = errBody?.error?.code;
-      if (code === 'custodian_key_invalid') {
-        throw new Error('Key rejected by custodian. Check the key and try again.');
-      }
-      throw new Error(errBody?.error?.message ?? 'Failed to register key.');
-    });
-  }
-
-  const displayError = validationError ?? actionError;
-
-  return (
-    <div role="dialog" aria-modal="true" aria-label="Register Custodian Key">
-      <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-        <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-md">
-          <h2 className="text-lg font-semibold text-gray-900 mb-1">
-            Register Custodian Key
-          </h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Connection: {connection.connection_id}
-          </p>
-
-          <form onSubmit={handleSubmit}>
-            <div className="mb-3">
-              <label
-                htmlFor="custodian-id"
-                className="block text-sm font-medium text-gray-700 mb-1"
-              >
-                Custodian ID
-              </label>
-              <input
-                id="custodian-id"
-                type="text"
-                value={custodianId}
-                onChange={(e) => setCustodianId(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-              />
-            </div>
-
-            <div className="mb-3">
-              <label
-                htmlFor="account-ref"
-                className="block text-sm font-medium text-gray-700 mb-1"
-              >
-                Account Reference
-              </label>
-              <input
-                id="account-ref"
-                type="text"
-                value={accountRef}
-                onChange={(e) => setAccountRef(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-              />
-            </div>
-
-            <div className="mb-4">
-              <label
-                htmlFor="plaintext-key"
-                className="block text-sm font-medium text-gray-700 mb-1"
-              >
-                API Key
-              </label>
-              {/* HARD CONSTRAINT: type="password" prevents browser from logging/autocompleting */}
-              <input
-                id="plaintext-key"
-                type="password"
-                autoComplete="new-password"
-                value={plaintextKey}
-                onChange={(e) => setPlaintextKey(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-              />
-            </div>
-
-            {displayError && (
-              <p role="alert" className="text-sm text-red-600 mb-4">
-                {displayError}
-              </p>
-            )}
-
-            <div className="flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={actionLoading}
-                className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-              >
-                {actionLoading ? 'Registering…' : 'Register Key'}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── SupplierConnectionsPage ───────────────────────────────────────────────────
 
 export function SupplierConnectionsPage() {
@@ -364,15 +207,10 @@ export function SupplierConnectionsPage() {
   } = useConnectionAction<void>();
 
   const [inviteOpen, setInviteOpen] = useState(false);
-  const [registerKeyTarget, setRegisterKeyTarget] = useState<Connection | null>(
-    null,
-  );
   const [inviteBanner, setInviteBanner] = useState<string | null>(null);
 
   async function handleSuspend(connectionId: string) {
-    const confirmed = window.confirm(
-      'Suspend this connection? The connection can be reactivated by registering a key again.',
-    );
+    const confirmed = window.confirm('Suspend this connection?');
     if (!confirmed) return;
 
     const result = await execute(async () => {
@@ -388,6 +226,24 @@ export function SupplierConnectionsPage() {
       }
     });
     // refetch only on success
+    if (result !== null) {
+      await refetch();
+    }
+  }
+
+  async function handleReactivate(connectionId: string) {
+    const result = await execute(async () => {
+      const response = await fetch(
+        `${API_BASE}/connections/${connectionId}/reactivate`,
+        { method: 'POST', headers: authHeaders() },
+      );
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          error?: { message?: string };
+        } | null;
+        throw new Error(body?.error?.message ?? 'Failed to reactivate connection.');
+      }
+    });
     if (result !== null) {
       await refetch();
     }
@@ -483,9 +339,9 @@ export function SupplierConnectionsPage() {
                     {conn.status === 'active' && (
                       <Link
                         to={`/dashboard/connections/${conn.connection_id}/agreement`}
-                        className="text-xs text-blue-600 hover:underline"
+                        className="px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 inline-block"
                       >
-                        Agreement
+                        Manage Agreement
                       </Link>
                     )}
                     {conn.pending_agreement === true && (
@@ -494,14 +350,6 @@ export function SupplierConnectionsPage() {
                   </div>
                 </td>
                 <td className="py-3 flex gap-2 flex-wrap">
-                  {conn.status === 'accepted' && (
-                    <button
-                      onClick={() => setRegisterKeyTarget(conn)}
-                      className="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
-                    >
-                      Register Custodian Key
-                    </button>
-                  )}
                   {conn.status === 'active' && (
                     <button
                       onClick={() => void handleSuspend(conn.connection_id)}
@@ -509,6 +357,15 @@ export function SupplierConnectionsPage() {
                       className="px-3 py-1 text-xs bg-orange-500 text-white rounded hover:bg-orange-600 disabled:opacity-50"
                     >
                       Suspend
+                    </button>
+                  )}
+                  {conn.status === 'suspended' && (
+                    <button
+                      onClick={() => void handleReactivate(conn.connection_id)}
+                      disabled={actionLoading}
+                      className="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                    >
+                      Reactivate
                     </button>
                   )}
                   {conn.status !== 'terminated' && (
@@ -544,16 +401,6 @@ export function SupplierConnectionsPage() {
         />
       )}
 
-      {registerKeyTarget && (
-        <RegisterKeyModal
-          connection={registerKeyTarget}
-          onClose={() => setRegisterKeyTarget(null)}
-          onSuccess={() => {
-            setRegisterKeyTarget(null);
-            void refetch();
-          }}
-        />
-      )}
     </div>
   );
 }

@@ -5,7 +5,6 @@ export interface Connection {
   supplier_id: string;            // UUID
   agent_id: string;               // UUID
   status: ConnectionStatus;
-  custodian_link_present: boolean;
   created_at: string;             // ISO-8601
   activated_at: string | null;    // ISO-8601 or null
   pending_agreement?: boolean;    // M3: true when a pending agreement awaits supplier confirmation
@@ -13,7 +12,6 @@ export interface Connection {
 
 export type ConnectionStatus =
   | 'pending'
-  | 'accepted'
   | 'active'
   | 'suspended'
   | 'terminated';
