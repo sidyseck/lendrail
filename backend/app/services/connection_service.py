@@ -7,11 +7,14 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Literal
 
+from app.adapters.interfaces import CustodianAdapter
 from app.core.errors import ConflictError, Forbidden, NotFoundError, ValidationError
 from app.notifications.interface import NotificationEvent, NotificationService
 from app.repositories.connection_repository import ConnectionRepository
+from app.repositories.custodian_link_repository import CustodianLinkRepository
 from app.repositories.org_repository import OrgRepository
 from app.schemas.auth import AuthUser
 
@@ -51,6 +54,21 @@ class TerminateResult:
     flagged_loan_ids: list[uuid.UUID] = field(default_factory=list)
 
 
+@dataclass
+class AssetInventoryEntry:
+    asset_type: str
+    published_quantity: Decimal
+    custodian_balance: Decimal | None
+    already_booked: Decimal
+    effective_available: Decimal
+
+
+@dataclass
+class InventoryScopeResult:
+    connection_id: uuid.UUID
+    entries: list[AssetInventoryEntry]
+
+
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 def _to_result(c, pending_agreement: bool = False) -> ConnectionResult:
@@ -87,10 +105,14 @@ class ConnectionService:
         self,
         connections: ConnectionRepository,
         orgs: OrgRepository,
+        custodian_links: CustodianLinkRepository,
+        custodian_adapter: CustodianAdapter,
         notifier: NotificationService,
     ) -> None:
         self.connections = connections
         self.orgs = orgs
+        self.custodian_links = custodian_links
+        self.custodian_adapter = custodian_adapter
         self.notifier = notifier
 
     # ── F-022 ─────────────────────────────────────────────────────────────────
@@ -327,6 +349,95 @@ class ConnectionService:
 
         return _to_result(connection)
 
+    # ── F-061 — inventory scope ──────────────────────────────────────────────
+
+    async def set_inventory_scope(
+        self,
+        caller: AuthUser,
+        connection_id: uuid.UUID,
+        scope: dict[str, Decimal],
+    ) -> ConnectionResult:
+        if caller.role != "supplier":
+            raise Forbidden("Only suppliers can set inventory scope")
+        if caller.org_id is None:
+            raise Forbidden("Caller has no associated organization")
+
+        connection = await self.connections.get(connection_id)
+        if connection.supplier_id != caller.org_id:
+            raise Forbidden("This connection does not belong to your organization")
+        if connection.status not in ("active", "suspended"):
+            raise ConflictError(
+                f"Cannot set inventory scope on a connection with status '{connection.status}'",
+                code="invalid_connection_status",
+            )
+
+        serialized_scope: dict[str, str] = {}
+        for asset_type, qty in scope.items():
+            asset = asset_type.strip()
+            if not asset:
+                raise ValidationError("Asset type must be non-empty", code="invalid_asset_type")
+            if qty < 0:
+                raise ValidationError(
+                    f"Published quantity for {asset_type} must be >= 0",
+                    code="invalid_quantity",
+                )
+            serialized_scope[asset] = str(qty)
+
+        connection = await self.connections.update(connection, inventory_scope=serialized_scope)
+        log.info(
+            "inventory_scope_updated connection_id=%s supplier_id=%s assets=%s",
+            connection_id, caller.org_id, list(serialized_scope.keys()),
+        )
+        return _to_result(connection)
+
+    async def get_inventory_scope(
+        self,
+        caller: AuthUser,
+        connection_id: uuid.UUID,
+        loan_repo,
+    ) -> InventoryScopeResult:
+        if caller.role not in ("supplier", "agent"):
+            raise Forbidden("Only suppliers and agents can view inventory scope")
+        if caller.org_id is None:
+            raise Forbidden("Caller has no associated organization")
+
+        connection = await self.connections.get(connection_id)
+        if caller.org_id not in (connection.supplier_id, connection.agent_id):
+            raise Forbidden("Your organization is not a party to this connection")
+
+        account_ref = await self._supplier_account_ref(connection.supplier_id)
+        positions = await self.custodian_adapter.get_inventory(account_ref)
+        custodian_data = {
+            position.asset_type: Decimal(str(position.quantity))
+            for position in positions
+        }
+
+        scope: dict[str, str] = connection.inventory_scope or {}
+        all_assets = set(scope.keys())
+        if caller.role == "supplier":
+            all_assets |= set(custodian_data.keys())
+
+        entries: list[AssetInventoryEntry] = []
+        for asset_type in sorted(all_assets):
+            published = Decimal(str(scope.get(asset_type, "0")))
+            raw_custodian_balance = custodian_data.get(asset_type, Decimal("0"))
+            already_booked = await loan_repo.sum_booked_quantity(connection_id, asset_type)
+            effective = max(
+                Decimal("0"),
+                min(raw_custodian_balance, published) - already_booked,
+            )
+            entries.append(
+                AssetInventoryEntry(
+                    asset_type=asset_type,
+                    published_quantity=published,
+                    custodian_balance=raw_custodian_balance if caller.role == "supplier" else None,
+                    already_booked=already_booked,
+                    effective_available=effective,
+                )
+            )
+
+        return InventoryScopeResult(connection_id=connection_id, entries=entries)
+
     # ── Private helpers ───────────────────────────────────────────────────────
 
     async def _get_and_assert_membership(
@@ -340,3 +451,10 @@ class ConnectionService:
         if caller.org_id not in (connection.supplier_id, connection.agent_id):
             raise Forbidden("Your organization is not a party to this connection")
         return connection
+
+    async def _supplier_account_ref(self, supplier_id: uuid.UUID) -> str:
+        links = await self.custodian_links.list_by_org(supplier_id)
+        active = next((link for link in links if link.status == "active"), None)
+        if active is None:
+            raise ConflictError("Supplier has no active custodian link", code="no_active_custodian_link")
+        return active.account_ref

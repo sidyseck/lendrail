@@ -1,6 +1,8 @@
 from uuid import UUID
 
-from sqlalchemy import and_, delete, select
+from decimal import Decimal
+
+from sqlalchemy import and_, delete, func as sqlfunc, select
 
 from app.db.repository import BaseRepository
 from app.models.borrower import Borrower
@@ -63,6 +65,18 @@ class LoanRepository(BaseRepository[Loan]):
             )
         )
         return list(result.scalars().all())
+
+    async def sum_booked_quantity(
+        self, connection_id: UUID, asset_type: str
+    ) -> Decimal:
+        result = await self.session.execute(
+            select(sqlfunc.coalesce(sqlfunc.sum(Loan.quantity), 0)).where(
+                Loan.connection_id == connection_id,
+                Loan.asset_type == asset_type,
+                Loan.state.in_(["pending", "active", "margin_call", "recall_initiated"]),
+            )
+        )
+        return Decimal(str(result.scalar()))
 
 
 class ApprovedBorrowerRepository(BaseRepository[ApprovedBorrower]):

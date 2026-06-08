@@ -78,11 +78,11 @@ async def m4_setup(seeded_client: AsyncClient) -> dict:
     assert resp.status_code == 200, resp.text
 
     resp = await seeded_client.post(
-        f"/connections/{connection_id}/custodian-key",
+        "/custodians",
         json={"custodian_id": "mock", "account_ref": "acct-001", "plaintext_key": "test-key"},
         headers=supplier["headers"],
     )
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 201, resp.text
 
     resp = await seeded_client.post(
         f"/connections/{connection_id}/agreement",
@@ -168,6 +168,13 @@ async def test_approved_borrower_and_booking_flow(seeded_client: AsyncClient, m4
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["borrowers"][0]["borrower_id"] == m4_setup["borrower_id"]
+
+    resp = await seeded_client.put(
+        f"/connections/{m4_setup['connection_id']}/inventory-scope",
+        json={"scope": {"BTC": "100.0"}},
+        headers=m4_setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200, resp.text
 
     resp = await seeded_client.post("/loans", json=booking, headers=m4_setup["agent"]["headers"])
     assert resp.status_code == 201, resp.text

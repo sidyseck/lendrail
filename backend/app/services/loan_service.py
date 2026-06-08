@@ -224,7 +224,7 @@ class LoanService:
             raise ValidationError("Fixed-term loans require a maturity date", code="maturity_date_required")
         if data.term_type == "open" and data.maturity_date is not None:
             raise ValidationError("Open-term loans must not include a maturity date", code="maturity_date_not_allowed")
-        connection = await self.connections.get(data.connection_id)
+        connection = await self.connections.get_for_update(data.connection_id)
         if connection.agent_id != caller.org_id:
             raise Forbidden("This connection does not belong to your organization")
         if connection.status != "active":
@@ -256,6 +256,24 @@ class LoanService:
         ltv = (data.collateral_value_usd / loan_value) * Decimal("100")
         if ltv > _decimal(agreement.initial_ltv_pct):
             raise ValidationError("Initial LTV exceeds agreement threshold", code="ltv_exceeded")
+
+        scope: dict[str, str] = connection.inventory_scope or {}
+        published_raw = scope.get(data.asset_type)
+        if published_raw is None:
+            raise ValidationError(
+                f"No inventory published for {data.asset_type} on this connection",
+                code="no_inventory_published",
+            )
+
+        published_qty = _decimal(published_raw)
+        already_booked = await self.loans.sum_booked_quantity(data.connection_id, data.asset_type)
+        remaining = published_qty - already_booked
+        if data.quantity > remaining:
+            raise ValidationError(
+                f"Quantity {data.quantity} exceeds remaining published inventory "
+                f"{remaining} ({published_qty} published - {already_booked} already booked)",
+                code="exceeds_published_inventory",
+            )
 
         account_ref = await self._supplier_account_ref(connection.supplier_id)
         inventory = await self.custodian.get_inventory(account_ref)

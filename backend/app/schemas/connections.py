@@ -1,4 +1,5 @@
-from typing import Annotated, Literal
+from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, model_validator
@@ -28,6 +29,13 @@ class InviteConnectionRequest(BaseModel):
                 "Provide only one of agent_org_id or agent_email"
             )
         return self
+
+
+class SetInventoryScopeRequest(BaseModel):
+    scope: dict[str, Decimal] = Field(
+        default_factory=dict,
+        description="Map of asset type to published quantity. Empty map blocks all bookings.",
+    )
 
 
 # ── Response models ───────────────────────────────────────────────────────────
@@ -60,3 +68,26 @@ class TerminateResponse(BaseModel):
         "Connection terminated. "
         "You must rotate the custodian API key at the custodian to revoke agent access."
     )
+
+
+class InventoryScopeEntrySupplierResponse(BaseModel):
+    asset_type: str
+    custodian_balance: str
+    published_quantity: str
+    already_booked: str
+    effective_available: str
+
+
+class InventoryScopeEntryAgentResponse(BaseModel):
+    asset_type: str
+    effective_available: str
+
+
+class InventoryScopeSupplierResponse(BaseModel):
+    connection_id: UUID
+    entries: list[InventoryScopeEntrySupplierResponse]
+
+
+class InventoryScopeAgentResponse(BaseModel):
+    connection_id: UUID
+    entries: list[InventoryScopeEntryAgentResponse]

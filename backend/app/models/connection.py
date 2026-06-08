@@ -3,7 +3,7 @@ from datetime import datetime
 
 import sqlalchemy as sa
 from sqlalchemy import DateTime, ForeignKey, func
-from sqlalchemy.dialects.postgresql import UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -42,6 +42,9 @@ class Connection(Base):
     )
     activated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    inventory_scope: Mapped[dict] = mapped_column(
+        JSONB(), nullable=False, default=dict, server_default=sa.text("'{}'::jsonb")
     )
 
     # Uniqueness is enforced by the partial index uq_connections_supplier_agent_active

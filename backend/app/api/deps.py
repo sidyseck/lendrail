@@ -115,13 +115,22 @@ def get_borrower_service(session: SessionDep) -> BorrowerService:
 # ---- connection service ----
 
 
-def get_connection_service(session: SessionDep) -> ConnectionService:
+def get_connection_service(
+    session: SessionDep,
+    custodian_adapter: CustodianAdapter = Depends(get_custodian_adapter),
+) -> ConnectionService:
     notifier = ConsoleNotificationAdapter(NotificationRepository(session))
     return ConnectionService(
         connections=ConnectionRepository(session),
         orgs=OrgRepository(session),
+        custodian_links=CustodianLinkRepository(session),
+        custodian_adapter=custodian_adapter,
         notifier=notifier,
     )
+
+
+def get_loan_repository(session: SessionDep) -> LoanRepository:
+    return LoanRepository(session)
 
 
 def get_custodian_service(

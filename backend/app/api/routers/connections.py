@@ -3,14 +3,25 @@ import uuid
 
 from fastapi import APIRouter, Depends, status
 
-from app.api.deps import get_agreement_service, get_connection_service, get_current_user
+from app.api.deps import (
+    get_agreement_service,
+    get_connection_service,
+    get_current_user,
+    get_loan_repository,
+)
 from app.api.rbac import require_role
+from app.repositories.loan_repository import LoanRepository
 from app.schemas.auth import AuthUser
 from app.schemas.connections import (
     ConnectionListResponse,
     ConnectionResponse,
+    InventoryScopeAgentResponse,
+    InventoryScopeEntryAgentResponse,
+    InventoryScopeEntrySupplierResponse,
+    InventoryScopeSupplierResponse,
     InviteConnectionRequest,
     InviteUnknownAgentResponse,
+    SetInventoryScopeRequest,
     TerminateResponse,
 )
 from app.services.agreement_service import AgreementService
@@ -182,3 +193,67 @@ async def get_connection(
 ) -> ConnectionResponse:
     result = await svc.get_detail(caller=caller, connection_id=connection_id)
     return await _with_pending_agreement(result, agreement_svc)
+
+
+# ── F-061 — inventory scope ──────────────────────────────────────────────────
+
+@router.put(
+    "/{connection_id}/inventory-scope",
+    response_model=ConnectionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Supplier sets the published inventory allocation for a connection",
+)
+async def set_inventory_scope(
+    connection_id: uuid.UUID,
+    body: SetInventoryScopeRequest,
+    caller: AuthUser = Depends(require_role("supplier")),
+    svc: ConnectionService = Depends(get_connection_service),
+) -> ConnectionResponse:
+    result = await svc.set_inventory_scope(
+        caller=caller,
+        connection_id=connection_id,
+        scope=body.scope,
+    )
+    return _to_response(result)
+
+
+@router.get(
+    "/{connection_id}/inventory",
+    status_code=status.HTTP_200_OK,
+    summary="Get inventory scope and availability for a connection",
+)
+async def get_inventory_scope(
+    connection_id: uuid.UUID,
+    caller: AuthUser = Depends(get_current_user),
+    svc: ConnectionService = Depends(get_connection_service),
+    loan_repo: LoanRepository = Depends(get_loan_repository),
+):
+    result = await svc.get_inventory_scope(
+        caller=caller,
+        connection_id=connection_id,
+        loan_repo=loan_repo,
+    )
+    if caller.role == "supplier":
+        return InventoryScopeSupplierResponse(
+            connection_id=result.connection_id,
+            entries=[
+                InventoryScopeEntrySupplierResponse(
+                    asset_type=e.asset_type,
+                    custodian_balance=str(e.custodian_balance),
+                    published_quantity=str(e.published_quantity),
+                    already_booked=str(e.already_booked),
+                    effective_available=str(e.effective_available),
+                )
+                for e in result.entries
+            ],
+        )
+    return InventoryScopeAgentResponse(
+        connection_id=result.connection_id,
+        entries=[
+            InventoryScopeEntryAgentResponse(
+                asset_type=e.asset_type,
+                effective_available=str(e.effective_available),
+            )
+            for e in result.entries
+        ],
+    )

@@ -13,14 +13,14 @@
 
 ## 0. Purpose and guiding principles
 
-F-061 adds the concept of a **published inventory allocation** to each supplier-agent connection. A supplier's custodian holds their total asset balance across any number of asset types. Before a loan can be booked, the supplier must explicitly declare how much of that balance is available to lend through each connection. The agent sees only the published amount — never the raw custodian balance.
+F-061 adds the concept of a **published inventory allocation** to each supplier-agent connection. A supplier's custodian holds their total asset balance across any number of asset types. Before a loan can be booked, the supplier must explicitly declare how much of that balance is available to lend through each connection. The agent sees effective availability for published assets — never the raw custodian balance or the raw published cap.
 
 **The three quantities that matter:**
 
 | Quantity | Source | Who sees it |
 |---|---|---|
 | `custodian_balance` | Live call to `CustodianAdapter.get_inventory()` | Supplier only |
-| `published_quantity` | `connections.inventory_scope[asset_type]` | Supplier only |
+| `published_quantity` | `connections.inventory_scope[asset_type]` | Supplier only in API responses; used internally to compute agent-visible availability |
 | `effective_available` | `min(custodian_balance, published_quantity) − already_booked` | Supplier + Agent |
 
 **"Already booked"** = sum of `quantity` across all loans on this connection for this asset type where `state IN ('pending', 'active', 'margin_call', 'recall_initiated')`. Settled and defaulted loans do not count.
@@ -40,12 +40,13 @@ F-061 adds the concept of a **published inventory allocation** to each supplier-
 |---|---|---|
 | **Migration 0012** | ADD `inventory_scope JSONB NOT NULL DEFAULT '{}'` to `connections` | No data migration needed; `{}` means "nothing published" |
 | **`Connection` ORM** | Add `inventory_scope: dict` mapped column | |
+| **`ConnectionRepository`** | Add `get_for_update(connection_id)` | Used by loan booking to serialize published-inventory checks |
 | **`LoanRepository`** | Add `sum_booked_quantity(connection_id, asset_type)` | Counts non-terminal loans |
 | **`ConnectionService`** | Add `set_inventory_scope()` and `get_inventory_scope()` | Supplier-only write; role-aware read |
 | **Schemas** | `SetInventoryScopeRequest`, `InventoryScopeResponse` (role-aware shape) | Agent response omits custodian balance |
 | **Router** | `PUT /connections/{id}/inventory-scope`, `GET /connections/{id}/inventory` | |
 | **`LoanService.book_loan`** | Two new guard checks before custodian inventory call | `no_inventory_published`, `exceeds_published_inventory` |
-| **`ConnectionResponse`** | Add `inventory_scope` field for supplier callers | |
+| **`ConnectionResponse`** | No change | Published quantities remain on the role-aware inventory endpoint, not generic connection list/detail |
 | **Frontend** | Supplier inventory scope editor; agent effective-available display | Extends existing `ConnectionsPage` |
 
 ---
@@ -64,7 +65,7 @@ F-061 adds the concept of a **published inventory allocation** to each supplier-
 
 Adds an inventory_scope JSONB column to connections.
 Stores the supplier's per-asset published quantity cap for each connection.
-Example: {"BTC": 100.0, "ETH": 50.0}
+Example: {"BTC": "100.0", "ETH": "50.0"}
 
 An empty map ({}) means no inventory is published and loan booking is blocked
 for all asset types on this connection.
@@ -91,7 +92,7 @@ def upgrade() -> None:
             "inventory_scope",
             JSONB(),
             nullable=False,
-            server_default="{}",
+            server_default=sa.text("'{}'::jsonb"),
         ),
     )
 
@@ -104,7 +105,7 @@ def downgrade() -> None:
 
 | Column | Type | Constraints | Notes |
 |---|---|---|---|
-| `inventory_scope` | `JSONB` | NOT NULL DEFAULT `{}` | Keys are asset type strings (any value). Values are `float` quantities. `{}` = nothing published. |
+| `inventory_scope` | `JSONB` | NOT NULL DEFAULT `{}` | Keys are asset type strings (any value). Values are decimal quantity strings, e.g. `"100.000000000000"`. `{}` = nothing published. |
 
 No index is needed — reads are always by connection PK; the JSONB is read as a whole.
 
@@ -119,7 +120,7 @@ Add one field to the existing `Connection` class:
 ```python
 # After activated_at:
 inventory_scope: Mapped[dict] = mapped_column(
-    JSONB(), nullable=False, default=dict
+    JSONB(), nullable=False, default=dict, server_default=sa.text("'{}'::jsonb")
 )
 ```
 
@@ -172,7 +173,7 @@ class Connection(Base):
         DateTime(timezone=True), nullable=True
     )
     inventory_scope: Mapped[dict] = mapped_column(
-        JSONB(), nullable=False, default=dict
+        JSONB(), nullable=False, default=dict, server_default=sa.text("'{}'::jsonb")
     )
 ```
 
@@ -180,7 +181,34 @@ class Connection(Base):
 
 ## §4. Repository change
 
-### 4.1 `LoanRepository.sum_booked_quantity`
+### 4.1 `ConnectionRepository.get_for_update`
+
+**File:** `backend/app/repositories/connection_repository.py`
+
+Add a lock-aware fetch for loan booking. This prevents two concurrent booking
+requests on the same connection from both observing the same remaining published
+inventory and oversubscribing the supplier's allocation.
+
+```python
+async def get_for_update(self, connection_id: UUID) -> Connection:
+    result = await self.session.execute(
+        select(Connection)
+        .where(Connection.id == connection_id)
+        .with_for_update()
+    )
+    connection = result.scalar_one_or_none()
+    if connection is None:
+        from app.core.errors import NotFoundError
+
+        raise NotFoundError(f"Connection {connection_id} not found")
+    return connection
+```
+
+`LoanService.book_loan()` must use `self.connections.get_for_update()` instead
+of `self.connections.get()` for the booking path only. Other connection reads do
+not need the lock.
+
+### 4.2 `LoanRepository.sum_booked_quantity`
 
 **File:** `backend/app/repositories/loan_repository.py`
 
@@ -245,7 +273,7 @@ async def set_inventory_scope(
     self,
     caller: AuthUser,
     connection_id: uuid.UUID,
-    scope: dict[str, float],
+    scope: dict[str, Decimal],
 ) -> ConnectionResult:
     """Supplier sets the per-asset published quantity for a connection.
 
@@ -266,17 +294,22 @@ async def set_inventory_scope(
             code="invalid_connection_status",
         )
 
+    serialized_scope: dict[str, str] = {}
     for asset_type, qty in scope.items():
+        asset = asset_type.strip()
+        if not asset:
+            raise ValidationError("Asset type must be non-empty", code="invalid_asset_type")
         if qty < 0:
             raise ValidationError(
                 f"Published quantity for {asset_type} must be >= 0",
                 code="invalid_quantity",
             )
+        serialized_scope[asset] = str(qty)
 
-    connection = await self.connections.update(connection, inventory_scope=scope)
+    connection = await self.connections.update(connection, inventory_scope=serialized_scope)
     log.info(
         "inventory_scope_updated connection_id=%s supplier_id=%s assets=%s",
-        connection_id, caller.org_id, list(scope.keys()),
+        connection_id, caller.org_id, list(serialized_scope.keys()),
     )
     return _to_result(connection)
 ```
@@ -306,34 +339,30 @@ async def get_inventory_scope(
     if caller.org_id not in (connection.supplier_id, connection.agent_id):
         raise Forbidden("Your organization is not a party to this connection")
 
-    # Pull custodian inventory — supplier only. Skip for agent (no custody data disclosed).
+    # Pull custodian inventory for both roles so effective_available is truthful.
+    # The router redacts custodian_balance for agents.
     custodian_data: dict[str, Decimal] = {}
-    if caller.role == "supplier":
-        account_ref = await self._supplier_account_ref(connection.supplier_id)
-        positions = await self.custodian_adapter.get_inventory(account_ref)
-        custodian_data = {p.asset_type: Decimal(str(p.quantity)) for p in positions}
+    account_ref = await self._supplier_account_ref(connection.supplier_id)
+    positions = await self.custodian_adapter.get_inventory(account_ref)
+    custodian_data = {p.asset_type: Decimal(str(p.quantity)) for p in positions}
 
-    # Union of all asset types: published scope + (supplier-only) custodian inventory.
-    scope: dict[str, float] = connection.inventory_scope or {}
+    # Union of all asset types: supplier sees published scope + custodian inventory;
+    # agent sees published assets only.
+    scope: dict[str, str] = connection.inventory_scope or {}
     all_assets: set[str] = set(scope.keys())
     if caller.role == "supplier":
         all_assets |= set(custodian_data.keys())
 
     entries: list[AssetInventoryEntry] = []
     for asset_type in sorted(all_assets):
-        published = Decimal(str(scope.get(asset_type, 0.0)))
-        custodian_bal = custodian_data.get(asset_type, Decimal("0")) if caller.role == "supplier" else None
+        published = Decimal(str(scope.get(asset_type, "0")))
+        raw_custodian_bal = custodian_data.get(asset_type, Decimal("0"))
+        custodian_bal = raw_custodian_bal if caller.role == "supplier" else None
         already_booked = await loan_repo.sum_booked_quantity(connection_id, asset_type)
-
-        if caller.role == "supplier":
-            effective = max(
-                Decimal("0"),
-                min(custodian_bal, published) - already_booked,
-            )
-        else:
-            # Agent: effective_available is min(published, infinity) − already_booked.
-            # We don't know the custodian balance; use published as the cap.
-            effective = max(Decimal("0"), published - already_booked)
+        effective = max(
+            Decimal("0"),
+            min(raw_custodian_bal, published) - already_booked,
+        )
 
         entries.append(AssetInventoryEntry(
             asset_type=asset_type,
@@ -346,11 +375,17 @@ async def get_inventory_scope(
     return InventoryScopeResult(connection_id=connection_id, entries=entries)
 ```
 
-**Note on `loan_repo` parameter:** `get_inventory_scope` takes `loan_repo` as a positional parameter rather than injecting it in `__init__`, because `ConnectionService` currently has no dependency on `LoanRepository` and adding one would widen the constructor across all existing call sites. The router passes it from its own DI.
+**Required service wiring:** `ConnectionService` must now receive
+`CustodianLinkRepository` and `CustodianAdapter` in addition to its existing
+repositories/services, and must add the same `_supplier_account_ref()` helper
+shape used by `LoanService`. Update `get_connection_service()` in `deps.py` and
+tests that construct `ConnectionService` directly. `LoanRepository` is still
+passed to `get_inventory_scope()` from the router to avoid adding a permanent
+loan dependency to all connection-service call sites.
 
-### 5.4 `_to_result` update
+### 5.4 `_to_result`
 
-The existing `_to_result` helper must now include `inventory_scope`:
+The existing `_to_result` helper remains unchanged:
 
 ```python
 def _to_result(c) -> ConnectionResult:
@@ -362,11 +397,11 @@ def _to_result(c) -> ConnectionResult:
         created_at=c.created_at.isoformat(),
         activated_at=c.activated_at.isoformat() if c.activated_at else None,
         pending_agreement=getattr(c, "pending_agreement", False),
-        inventory_scope=dict(c.inventory_scope) if c.inventory_scope else {},
     )
 ```
 
-And add `inventory_scope: dict` to the `ConnectionResult` dataclass.
+No `inventory_scope` field is added to `ConnectionResult`; inventory scope is
+returned only by the dedicated role-aware inventory endpoint.
 
 ---
 
@@ -374,14 +409,20 @@ And add `inventory_scope: dict` to the `ConnectionResult` dataclass.
 
 **File:** `backend/app/services/loan_service.py`
 
-Insert two new checks in `LoanService.book_loan`, immediately **before** the existing custodian inventory call (currently at line ~261). The service already has `ConnectionRepository` and needs `LoanRepository` (already present).
+Insert two new checks in `LoanService.book_loan`, immediately **before** the existing custodian inventory call (currently at line ~261). The service already has `ConnectionRepository` and `LoanRepository`.
+
+At the start of the booking path, fetch the connection with
+`self.connections.get_for_update(data.connection_id)` instead of
+`self.connections.get(data.connection_id)`. The row lock must be acquired before
+`sum_booked_quantity()` and held through loan creation by the request
+transaction.
 
 The checks run after agreement validation passes (asset scope, collateral, LTV) and before the custodian network call, to fail fast on business rules without hitting the custodian.
 
 ```python
 # ── F-061: published inventory scope checks ──────────────────────────────────
 
-scope: dict = connection.inventory_scope or {}
+scope: dict[str, str] = connection.inventory_scope or {}
 published_raw = scope.get(data.asset_type)
 
 if published_raw is None:
@@ -420,22 +461,22 @@ inventory = await self.custodian.get_inventory(account_ref)
 ### 7.1 `SetInventoryScopeRequest`
 
 ```python
+from decimal import Decimal
+
 class SetInventoryScopeRequest(BaseModel):
     # Keys are asset type strings (any value accepted — no whitelist).
     # Values are published quantities. Must be >= 0.
     # An empty dict ({}) means no inventory is published.
-    scope: dict[str, float] = Field(
+    scope: dict[str, Decimal] = Field(
         default_factory=dict,
         description="Map of asset type → published quantity. Empty map blocks all bookings.",
     )
-
-    @model_validator(mode="after")
-    def check_quantities_non_negative(self) -> "SetInventoryScopeRequest":
-        for asset_type, qty in self.scope.items():
-            if qty < 0:
-                raise ValueError(f"Quantity for {asset_type} must be >= 0")
-        return self
 ```
+
+Do not reject negative quantities in the Pydantic model if the implementation
+must return `code="invalid_quantity"`. Let `ConnectionService.set_inventory_scope()`
+perform that validation and raise the domain `ValidationError`; otherwise the
+global request-validation handler will return `code="validation_error"`.
 
 ### 7.2 `InventoryScopeEntryResponse` (supplier view)
 
@@ -465,23 +506,11 @@ class InventoryScopeAgentResponse(BaseModel):
 
 Decimals are serialized as strings throughout to match the pattern established in M3 for `initial_ltv_pct` and `margin_call_ltv_pct`.
 
-### 7.3 `ConnectionResponse` update
+### 7.3 `ConnectionResponse`
 
-Add `inventory_scope` to the existing `ConnectionResponse`:
-
-```python
-class ConnectionResponse(BaseModel):
-    connection_id: UUID
-    supplier_id: UUID
-    agent_id: UUID
-    status: str
-    pending_agreement: bool
-    created_at: str
-    activated_at: str | None
-    inventory_scope: dict[str, float]   # Always present; {} if nothing published
-```
-
-This is safe to expose to both supplier and agent in the connection list — it discloses only the published quantities, not the custodian balance.
+Do not add `inventory_scope` to `ConnectionResponse`. The current router uses one
+mapper for supplier, agent, and admin list/detail responses; adding the raw map
+there would leak published quantities outside the role-aware inventory endpoint.
 
 ---
 
@@ -592,13 +621,30 @@ async def get_inventory_scope(
 ```python
 from app.repositories.loan_repository import LoanRepository
 
-async def get_loan_repository(
-    session: AsyncSession = Depends(get_db),
-) -> LoanRepository:
+def get_loan_repository(session: SessionDep) -> LoanRepository:
     return LoanRepository(session)
 ```
 
-`get_connection_service` already exists and wires `ConnectionService`. No changes needed there — `loan_repo` is passed directly from the route handler.
+Update `get_connection_service()` to pass the newly required
+`CustodianLinkRepository(session)` and `custodian_adapter` into
+`ConnectionService`:
+
+```python
+def get_connection_service(
+    session: SessionDep,
+    custodian_adapter: CustodianAdapter = Depends(get_custodian_adapter),
+) -> ConnectionService:
+    notifier = ConsoleNotificationAdapter(NotificationRepository(session))
+    return ConnectionService(
+        connections=ConnectionRepository(session),
+        orgs=OrgRepository(session),
+        custodian_links=CustodianLinkRepository(session),
+        custodian_adapter=custodian_adapter,
+        notifier=notifier,
+    )
+```
+
+`loan_repo` is passed directly from the route handler.
 
 ---
 
@@ -612,7 +658,8 @@ async def get_loan_repository(
 # PUT /connections/{id}/inventory-scope
 test_set_inventory_scope_supplier_success
     - POST /connections/invite → POST /connections/{id}/accept → active connection
-    - PUT /connections/{id}/inventory-scope {"BTC": 100.0} → 200, response.inventory_scope == {"BTC": 100.0}
+    - PUT /connections/{id}/inventory-scope {"scope": {"BTC": "100.0"}} → 200
+    - GET /connections/{id}/inventory as supplier → BTC published_quantity == "100.0"
 
 test_set_inventory_scope_agent_forbidden
     - PUT with agent JWT → 403
@@ -621,21 +668,21 @@ test_set_inventory_scope_wrong_supplier_forbidden
     - PUT with a different supplier's JWT → 403
 
 test_set_inventory_scope_pending_connection_rejected
-    - PUT on pending connection → 409, code="invalid_connection_status"
+    - PUT {"scope": {"BTC": "100.0"}} on pending connection → 409, code="invalid_connection_status"
 
 test_set_inventory_scope_negative_quantity_rejected
-    - PUT {"BTC": -1.0} → 422, code="invalid_quantity"
+    - PUT {"scope": {"BTC": "-1.0"}} → 422, code="invalid_quantity"
 
 test_set_inventory_scope_empty_dict_accepted
-    - PUT {} → 200, response.inventory_scope == {}
+    - PUT {"scope": {}} → 200; subsequent GET /inventory has no published assets
 
 test_set_inventory_scope_any_asset_type_accepted
-    - PUT {"ETH": 50.0, "USDC": 1000000.0} → 200
+    - PUT {"scope": {"ETH": "50.0", "USDC": "1000000.0"}} → 200
 
 # GET /connections/{id}/inventory
 test_get_inventory_scope_supplier_sees_custodian_balance
     - Seed mock custodian with {"BTC": 500.0}
-    - SET inventory_scope to {"BTC": 100.0}
+    - SET inventory_scope to {"BTC": "100.0"}
     - GET /connections/{id}/inventory (supplier JWT)
     - Response.entries[0].custodian_balance == "500.0"
     - Response.entries[0].published_quantity == "100.0"
@@ -648,19 +695,19 @@ test_get_inventory_scope_agent_sees_only_effective_available
     - Response.entries[0] has NO custodian_balance key
 
 test_get_inventory_scope_already_booked_subtracted
-    - SET inventory_scope {"BTC": 100.0}
+    - SET inventory_scope {"BTC": "100.0"}
     - Book a loan for 30 BTC → state=pending
     - GET /connections/{id}/inventory (supplier JWT)
     - already_booked == "30.0", effective_available == "70.0"
 
 test_get_inventory_scope_custodian_balance_cap_applied
     - Seed mock custodian with {"BTC": 40.0} (less than published)
-    - SET inventory_scope {"BTC": 100.0}
+    - SET inventory_scope {"BTC": "100.0"}
     - GET → effective_available == "40.0"  (capped by custodian balance)
 
 test_get_inventory_scope_unpublished_asset_visible_to_supplier
     - Seed mock custodian with {"BTC": 500.0, "ETH": 200.0}
-    - SET inventory_scope {"BTC": 100.0}  (ETH not in scope)
+    - SET inventory_scope {"BTC": "100.0"}  (ETH not in scope)
     - Supplier GET → two entries: BTC (published=100), ETH (published=0, effective=0)
 
 test_get_inventory_scope_unpublished_asset_hidden_from_agent
@@ -679,28 +726,39 @@ test_book_loan_no_inventory_published
     - POST /loans → 422, code="no_inventory_published"
 
 test_book_loan_asset_not_in_scope
-    - inventory_scope = {"BTC": 100.0}
+    - inventory_scope = {"BTC": "100.0"}
     - Book loan for "ETH" → 422, code="no_inventory_published"
 
 test_book_loan_exceeds_published_inventory
-    - inventory_scope = {"BTC": 100.0}
+    - inventory_scope = {"BTC": "100.0"}
     - Book loan for 150 BTC → 422, code="exceeds_published_inventory"
 
 test_book_loan_already_booked_counted
-    - inventory_scope = {"BTC": 100.0}
+    - inventory_scope = {"BTC": "100.0"}
     - Book a 70 BTC loan (succeeds, state=pending)
     - Book a second 40 BTC loan → 422, code="exceeds_published_inventory"
       (100 - 70 = 30 remaining; 40 > 30)
 
 test_book_loan_settled_loans_not_counted
-    - inventory_scope = {"BTC": 100.0}
+    - inventory_scope = {"BTC": "100.0"}
     - Book a 70 BTC loan, advance to settled state via recall + return
     - Book a new 100 BTC loan → succeeds (settled loan no longer counted)
 
 test_book_loan_within_scope_succeeds
-    - inventory_scope = {"BTC": 100.0}
+    - inventory_scope = {"BTC": "100.0"}
     - Seed custodian with {"BTC": 500.0}
     - Book 100 BTC → 201 (on boundary, allowed)
+
+test_book_loan_concurrent_requests_do_not_oversubscribe_scope
+    - inventory_scope = {"BTC": "100.0"}
+    - Seed custodian with {"BTC": 500.0}
+    - Launch two booking attempts for 70 BTC against the same active connection
+    - Exactly one request succeeds; the other fails with code="exceeds_published_inventory"
+
+Existing M4 booking-success tests must publish inventory before booking. Any test
+that previously expected a successful loan booking now needs a setup call to
+`PUT /connections/{id}/inventory-scope` with sufficient scope, unless the test is
+specifically asserting `no_inventory_published`.
 ```
 
 ---
@@ -711,7 +769,7 @@ test_book_loan_within_scope_succeeds
 
 | File | Change |
 |---|---|
-| `src/types/connection.ts` | Add `inventory_scope` to `Connection`; add `InventoryScopeEntry*` types |
+| `src/types/connection.ts` | Add `InventoryScopeEntry*` types |
 | `src/hooks/useInventoryScope.ts` | New: fetches `GET /connections/{id}/inventory` |
 | `src/pages/connections/SupplierConnectionsPage.tsx` | Add "Manage Inventory" panel per connection row |
 | `src/pages/connections/AgentConnectionsPage.tsx` | Add effective-available display per connection row |
@@ -720,18 +778,6 @@ test_book_loan_within_scope_succeeds
 ### 10.2 Updated TypeScript types (`src/types/connection.ts`)
 
 ```ts
-// Add to Connection interface:
-export interface Connection {
-  connection_id: string;
-  supplier_id: string;
-  agent_id: string;
-  status: ConnectionStatus;
-  pending_agreement: boolean;
-  created_at: string;
-  activated_at: string | null;
-  inventory_scope: Record<string, number>;  // NEW: {} when nothing published
-}
-
 // New types for GET /connections/{id}/inventory
 export interface InventoryScopeEntrySupplier {
   asset_type: string;
@@ -827,21 +873,21 @@ InventoryScopePanel (for a specific connection_id)
 ```ts
 // Local form state (controlled):
 const [editScope, setEditScope] = useState<Record<string, string>>({});
-// editScope keys are asset type strings; values are string inputs (convert to float on submit)
+// editScope keys are asset type strings; values are decimal string inputs
 ```
 
 **Submit handler:**
 
 ```ts
 async function handleSaveScope() {
-  const scope: Record<string, number> = {};
+  const scope: Record<string, string> = {};
   for (const [asset, qty] of Object.entries(editScope)) {
-    const parsed = parseFloat(qty);
-    if (isNaN(parsed) || parsed < 0) {
+    const parsed = Number(qty);
+    if (!Number.isFinite(parsed) || parsed < 0) {
       setFormError(`Invalid quantity for ${asset}`);
       return;
     }
-    scope[asset] = parsed;
+    scope[asset] = qty;
   }
   await execute(async () => {
     const { response, error: apiError } = await apiClient.PUT(
@@ -897,7 +943,7 @@ Add to `src/mocks/handlers/connections.ts`:
 
 ```ts
 // Mutable scope store per connection
-const mockScopes: Record<string, Record<string, number>> = {};
+const mockScopes: Record<string, Record<string, string>> = {};
 
 // PUT /api/connections/:connection_id/inventory-scope
 http.put('/api/connections/:connection_id/inventory-scope', async ({ params, request }) => {
@@ -908,16 +954,15 @@ http.put('/api/connections/:connection_id/inventory-scope', async ({ params, req
   if (!['active', 'suspended'].includes(conn.status)) {
     return mockError('invalid_connection_status', `Cannot set inventory scope on '${conn.status}' connection`, 409);
   }
-  const body = (await request.json()) as { scope: Record<string, number> };
+  const body = (await request.json()) as { scope: Record<string, string> };
   for (const [asset, qty] of Object.entries(body.scope)) {
-    if (qty < 0) {
+    const parsed = Number(qty);
+    if (!Number.isFinite(parsed) || parsed < 0) {
       return mockError('invalid_quantity', `Quantity for ${asset} must be >= 0`, 422);
     }
   }
   mockScopes[id] = body.scope;
-  const updated = { ...conn, inventory_scope: body.scope };
-  mockConnections = mockConnections.map((c) => c.connection_id === id ? updated : c);
-  return HttpResponse.json(updated, { status: 200 });
+  return HttpResponse.json(conn, { status: 200 });
 }),
 
 // GET /api/connections/:connection_id/inventory  (supplier view — mock always returns supplier shape)
@@ -930,7 +975,7 @@ http.get('/api/connections/:connection_id/inventory', async ({ params }) => {
     custodian_balance: '500.0',    // fixed mock custodian balance
     published_quantity: String(published),
     already_booked: '0.0',
-    effective_available: String(Math.min(500, published)),
+    effective_available: String(Math.min(500, Number(published))),
   }));
   return HttpResponse.json({ connection_id: id, entries }, { status: 200 });
 }),
@@ -942,8 +987,8 @@ http.get('/api/connections/:connection_id/inventory', async ({ params }) => {
 
 | # | Decision | Status | Notes |
 |---|---|---|---|
-| **D-1** | **Agent response excludes assets with `effective_available = 0`** | Recommended | Assets the supplier hasn't published serve no purpose in the agent view — showing them creates noise. The supplier view includes them (to prompt publishing). Confirm with product. |
-| **D-2** | **`inventory_scope` in `ConnectionResponse` visibility** | Open | The `inventory_scope` map is currently returned in `ConnectionResponse` for both supplier and agent callers. This discloses the published quantity (not custodian balance) to the agent via the list endpoint. This is the same data the agent sees in `GET /connections/{id}/inventory`. If product wants to hide even the published quantity from the agent in the list view, supplier and agent responses need to diverge in `ConnectionResponse`. |
-| **D-3** | **What happens to loans when inventory_scope is reduced below already-booked** | Open | If a supplier sets `{"BTC": 10.0}` when 50 BTC is already booked, `effective_available` goes negative internally but is clamped to 0 in the response. **Active loans are not affected** — only new bookings are blocked. The platform does not auto-recall or flag existing loans. If product wants an alert (e.g., supplier reduced below booked level), a notification event `"inventory_scope_below_booked"` should be added to `set_inventory_scope`. Not in this spec. |
+| **D-1** | **Agent inventory endpoint visibility** | Accepted | Agent responses include published asset types and `effective_available` only. They do not include `published_quantity` or `custodian_balance`. The frontend may hide entries with `effective_available = 0` for display compactness. |
+| **D-2** | **No `inventory_scope` in `ConnectionResponse`** | Accepted | Generic connection list/detail responses stay unchanged. Published quantities are available only to supplier callers through `GET /connections/{id}/inventory`. |
+| **D-3** | **What happens to loans when inventory_scope is reduced below already-booked** | Open | If a supplier sets `{"BTC": "10.0"}` when 50 BTC is already booked, `effective_available` goes negative internally but is clamped to 0 in the response. **Active loans are not affected** — only new bookings are blocked. The platform does not auto-recall or flag existing loans. If product wants an alert (e.g., supplier reduced below booked level), a notification event `"inventory_scope_below_booked"` should be added to `set_inventory_scope`. Not in this spec. |
 | **D-4** | **`PUT /connections/{id}/inventory-scope` allowed on `suspended` connections** | Recommended | Allowing edits while suspended means the supplier can pre-configure scope before reactivating. Disallowing it would force a two-step flow (reactivate → edit). Confirm with product. |
 | **D-5** | **`sum_booked_quantity` N+1 in `get_inventory_scope`** | Accepted for MVP | `get_inventory_scope` calls `sum_booked_quantity` once per asset type. For 1–5 assets in MVP this is acceptable. If asset count grows, replace with a single GROUP BY query: `SELECT asset_type, SUM(quantity) FROM loans WHERE connection_id = $1 AND state IN (...) GROUP BY asset_type`. |

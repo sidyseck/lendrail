@@ -42,6 +42,19 @@ class ConnectionRepository(BaseRepository[Connection]):
         result = await self.session.execute(select(Connection))
         return list(result.scalars().all())
 
+    async def get_for_update(self, connection_id: UUID) -> Connection:
+        result = await self.session.execute(
+            select(Connection)
+            .where(Connection.id == connection_id)
+            .with_for_update()
+        )
+        connection = result.scalar_one_or_none()
+        if connection is None:
+            from app.core.errors import NotFoundError
+
+            raise NotFoundError(f"Connection {connection_id} not found")
+        return connection
+
     async def list_active_loans_by_connection(self, connection_id: UUID) -> list[UUID]:
         """Return non-terminal loans that should be flagged when a connection ends."""
         result = await self.session.execute(
