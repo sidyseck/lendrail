@@ -262,16 +262,21 @@ The agent lender books each loan into the platform. The platform validates the l
 **What the agent enters:**
 - Borrower (must be an onboarded entity linked to this agent)
 - Asset type and quantity
+- Asset price, defaulted from current market data but editable by the agent
+- Booking LTV, defaulted from the agreement initial LTV but editable by the agent
+- Margin call and liquidation thresholds, defaulted from the supplier-agent agreement but editable because the borrower loan is separately negotiated
 - Loan rate
 - Loan term (open or fixed, with maturity date)
-- Collateral type, quantity, and initial valuation
+- Collateral type, quantity, and initial valuation. The ticket computes collateral value from price, quantity, and booking LTV; if the agent edits collateral value directly, the ticket recomputes implied booking LTV.
 
 **Platform validation on booking:**
 - Borrower is on supplier's approved borrower list
 - Asset type is in scope per the agreement
 - Collateral type is eligible per the agreement
-- Initial LTV meets the agreed threshold
+- Supplier-agent agreement LTV terms are guidance and defaults for the borrower loan. If the agent changes booking LTV, margin call threshold, or liquidation threshold, the platform warns but does not block booking solely because the borrower-loan terms differ from the supplier-agent agreement.
 - Loan size meets minimum per agreement
+
+**Contract separation:** The supplier-agent agreement governs what inventory the supplier makes available and the baseline economics the supplier wants. The borrower loan records the executed economics negotiated with the borrower. Post-MVP, the platform may add a supplier review workflow when borrower-loan terms are more aggressive than supplier guidance. MVP only warns and records the executed terms.
 
 **Custodian confirmation:** platform checks the inventory feed to verify the asset is present in the supplier's custodian account. Collateral receipt is confirmed against the collateral feed. Platform does not trigger the asset movement — it records the state.
 

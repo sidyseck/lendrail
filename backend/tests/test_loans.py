@@ -91,6 +91,7 @@ async def m4_setup(seeded_client: AsyncClient) -> dict:
             "eligible_collateral": ["CASH_USD"],
             "initial_ltv_pct": "70.0000",
             "margin_call_ltv_pct": "80.0000",
+            "liquidation_ltv_pct": "90.0000",
             "recall_notice_days": 3,
             "max_loan_days": 30,
             "day_count_basis": "actual_360",
@@ -133,6 +134,9 @@ async def test_0011_migration_applies(test_engine: AsyncEngine) -> None:
         tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
         assert "loans" in tables
         assert "connection_approved_borrowers" in tables
+        columns = await conn.run_sync(lambda c: inspect(c).get_columns("loans"))
+        column_names = {column["name"] for column in columns}
+        assert {"asset_price_usd", "booking_ltv_pct", "margin_call_ltv_pct", "liquidation_ltv_pct"} <= column_names
         state_enum = await conn.execute(text("SELECT typname FROM pg_type WHERE typname = 'loan_state_enum'"))
         assert state_enum.scalar() == "loan_state_enum"
 
@@ -144,6 +148,10 @@ async def test_approved_borrower_and_booking_flow(seeded_client: AsyncClient, m4
         "borrower_id": m4_setup["borrower_id"],
         "asset_type": "BTC",
         "quantity": "0.50",
+        "asset_price_usd": "65000.00",
+        "booking_ltv_pct": "70.0000",
+        "margin_call_ltv_pct": "80.0000",
+        "liquidation_ltv_pct": "90.0000",
         "rate_bps": 500,
         "term_type": "open",
         "maturity_date": None,
@@ -220,6 +228,10 @@ async def test_create_borrower_with_connection_enables_supplier_visibility_and_b
             "borrower_id": borrower_id,
             "asset_type": "BTC",
             "quantity": "0.50",
+            "asset_price_usd": "65000.00",
+            "booking_ltv_pct": "70.0000",
+            "margin_call_ltv_pct": "80.0000",
+            "liquidation_ltv_pct": "90.0000",
             "rate_bps": 500,
             "term_type": "open",
             "maturity_date": None,
@@ -236,6 +248,163 @@ async def test_create_borrower_with_connection_enables_supplier_visibility_and_b
     resp = await seeded_client.get("/loans?state=pending", headers=m4_setup["supplier"]["headers"])
     assert resp.status_code == 200, resp.text
     assert [row["loan_id"] for row in resp.json()["loans"]] == [loan_id]
+    loan = resp.json()["loans"][0]
+    assert loan["asset_price_usd"] == "65000.00000000"
+    assert loan["booking_ltv_pct"] == "70.0000"
+    assert loan["margin_call_ltv_pct"] == "80.0000"
+    assert loan["liquidation_ltv_pct"] == "90.0000"
+
+
+@pytest.mark.asyncio
+async def test_booking_accepts_terms_that_differ_from_supplier_guidance(
+    seeded_client: AsyncClient, m4_setup: dict
+) -> None:
+    resp = await seeded_client.post(
+        f"/connections/{m4_setup['connection_id']}/approved-borrowers",
+        json={"borrower_id": m4_setup["borrower_id"]},
+        headers=m4_setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    resp = await seeded_client.put(
+        f"/connections/{m4_setup['connection_id']}/inventory-scope",
+        json={"scope": {"BTC": "100.0"}},
+        headers=m4_setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = await seeded_client.post(
+        "/loans",
+        json={
+            "connection_id": m4_setup["connection_id"],
+            "borrower_id": m4_setup["borrower_id"],
+            "asset_type": "BTC",
+            "quantity": "0.50",
+            "asset_price_usd": "65000.00",
+            "booking_ltv_pct": "75.0000",
+            "margin_call_ltv_pct": "82.0000",
+            "liquidation_ltv_pct": "92.0000",
+            "rate_bps": 500,
+            "term_type": "open",
+            "maturity_date": None,
+            "collateral_type": "CASH_USD",
+            "collateral_quantity": "24375",
+        },
+        headers=m4_setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    loan_id = resp.json()["loan_id"]
+
+    resp = await seeded_client.get(f"/loans/{loan_id}", headers=m4_setup["agent"]["headers"])
+    assert resp.status_code == 200, resp.text
+    loan = resp.json()
+    assert loan["collateral_value_usd"] == "24375.00000000"
+    assert loan["booking_ltv_pct"] == "75.0000"
+    assert loan["margin_call_ltv_pct"] == "82.0000"
+    assert loan["liquidation_ltv_pct"] == "92.0000"
+
+
+@pytest.mark.asyncio
+async def test_booking_recomputes_implied_ltv_from_collateral_value(
+    seeded_client: AsyncClient, m4_setup: dict
+) -> None:
+    resp = await seeded_client.post(
+        f"/connections/{m4_setup['connection_id']}/approved-borrowers",
+        json={"borrower_id": m4_setup["borrower_id"]},
+        headers=m4_setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    resp = await seeded_client.put(
+        f"/connections/{m4_setup['connection_id']}/inventory-scope",
+        json={"scope": {"BTC": "100.0"}},
+        headers=m4_setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = await seeded_client.post(
+        "/loans",
+        json={
+            "connection_id": m4_setup["connection_id"],
+            "borrower_id": m4_setup["borrower_id"],
+            "asset_type": "BTC",
+            "quantity": "1.00",
+            "asset_price_usd": "100.00",
+            "booking_ltv_pct": "70.0000",
+            "margin_call_ltv_pct": "80.0000",
+            "liquidation_ltv_pct": "90.0000",
+            "rate_bps": 500,
+            "term_type": "open",
+            "maturity_date": None,
+            "collateral_type": "CASH_USD",
+            "collateral_quantity": "75",
+            "collateral_value_usd": "75.00",
+        },
+        headers=m4_setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    loan_id = resp.json()["loan_id"]
+
+    resp = await seeded_client.get(f"/loans/{loan_id}", headers=m4_setup["agent"]["headers"])
+    assert resp.status_code == 200, resp.text
+    loan = resp.json()
+    assert loan["booking_ltv_pct"] == "75.0000"
+    assert loan["current_ltv_pct"] == "75.0000"
+    assert loan["collateral_value_usd"] == "75.00000000"
+
+
+@pytest.mark.asyncio
+async def test_booking_rejects_invalid_executed_threshold_order(
+    seeded_client: AsyncClient, m4_setup: dict
+) -> None:
+    resp = await seeded_client.post(
+        f"/connections/{m4_setup['connection_id']}/approved-borrowers",
+        json={"borrower_id": m4_setup["borrower_id"]},
+        headers=m4_setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    resp = await seeded_client.put(
+        f"/connections/{m4_setup['connection_id']}/inventory-scope",
+        json={"scope": {"BTC": "100.0"}},
+        headers=m4_setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = await seeded_client.post(
+        "/loans",
+        json={
+            "connection_id": m4_setup["connection_id"],
+            "borrower_id": m4_setup["borrower_id"],
+            "asset_type": "BTC",
+            "quantity": "1.00",
+            "asset_price_usd": "100.00",
+            "booking_ltv_pct": "70.0000",
+            "margin_call_ltv_pct": "80.0000",
+            "liquidation_ltv_pct": "90.0000",
+            "rate_bps": 500,
+            "term_type": "open",
+            "maturity_date": None,
+            "collateral_type": "CASH_USD",
+            "collateral_quantity": "85",
+            "collateral_value_usd": "85.00",
+        },
+        headers=m4_setup["agent"]["headers"],
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_ltv_thresholds"
+
+
+@pytest.mark.asyncio
+async def test_market_price_endpoint_returns_default_price(
+    seeded_client: AsyncClient, m4_setup: dict
+) -> None:
+    resp = await seeded_client.get(
+        "/market-data/prices/BTC",
+        headers=m4_setup["agent"]["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["asset_type"] == "BTC"
+    assert body["price_usd"] == "65000.0"
+    assert body["as_of"]
 
 
 @pytest.mark.asyncio

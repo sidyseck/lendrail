@@ -589,7 +589,7 @@ On termination, flags all active loans on the connection and returns their IDs i
 **Depends on:** F-021
 **Actor(s):** System
 
-**What it does:** Adds the `lending_agreements` Alembic migration (0009) with all columns: `id`, `connection_id` (FK → connections ON DELETE RESTRICT), `version`, `assets_in_scope` (TEXT[]), `eligible_collateral` (TEXT[]), `initial_ltv_pct` (NUMERIC 10,4), `margin_call_ltv_pct` (NUMERIC 10,4), `recall_notice_days`, `max_loan_days`, `day_count_basis` (ENUM: actual_360, actual_365), `agent_fee_bps`, `confirmed_by_supplier_at`, `confirmed_by_agent_at`, `created_at`.
+**What it does:** Adds the `lending_agreements` Alembic migration (0009) with all columns: `id`, `connection_id` (FK → connections ON DELETE RESTRICT), `version`, `assets_in_scope` (TEXT[]), `eligible_collateral` (TEXT[]), `initial_ltv_pct` (NUMERIC 10,4), `margin_call_ltv_pct` (NUMERIC 10,4), `liquidation_ltv_pct` (NUMERIC 10,4), `recall_notice_days`, `max_loan_days`, `day_count_basis` (ENUM: actual_360, actual_365), `agent_fee_bps`, `confirmed_by_supplier_at`, `confirmed_by_agent_at`, `created_at`.
 
 `status` (`pending_confirmation` | `active`) is a derived field computed at read time: `active` when both confirmation timestamps are non-null.
 
@@ -599,6 +599,7 @@ On termination, flags all active loans on the connection and returns their IDs i
 - [x] `connection_id` FK enforces referential integrity (ON DELETE RESTRICT).
 - [x] `version` starts at 1 for a new agreement; increments at the application layer on each amendment.
 - [x] Index on `connection_id` for efficient latest-version lookup.
+- [ ] `liquidation_ltv_pct` is stored as `NUMERIC(10,4)` and serialized as a string in agreement responses.
 
 **Out of scope for this feature:** Agreement API endpoints; confirmation flow.
 
@@ -616,6 +617,7 @@ On termination, flags all active loans on the connection and returns their IDs i
 - [x] Calling with a supplier JWT returns HTTP 403.
 - [x] Missing any required term returns HTTP 422 with field-level error messages.
 - [x] `margin_call_ltv_pct` must be greater than `initial_ltv_pct`; violation returns HTTP 422.
+- [ ] `liquidation_ltv_pct` must be greater than `margin_call_ltv_pct`; violation returns HTTP 422.
 - [x] `initial_ltv_pct` must be between 0 and 100 (exclusive); violation returns HTTP 422.
 - [x] `agent_fee_bps` must be between 0 and 10000 (inclusive); violation returns HTTP 422.
 - [x] `recall_notice_days` and `max_loan_days` must be ≥ 1; violation returns HTTP 422.
@@ -684,7 +686,7 @@ On termination, flags all active loans on the connection and returns their IDs i
 
 **Acceptance criteria:**
 - [x] Agent can navigate to an active connection, click "Enter Agreement Terms", fill the form, and submit → redirects to agreement view.
-- [x] All form fields show inline validation: LTV 0–100, margin call must exceed initial LTV, integer fields ≥ 1, bps 0–10000.
+- [x] All form fields show inline validation: LTV 0–100, margin call must exceed initial LTV, liquidation must exceed margin call, integer fields ≥ 1, bps 0–10000.
 - [x] Amend path: agent opens form pre-populated with current terms, edits, submits → new version created.
 - [x] Supplier view shows "Confirm" button when agreement is `pending_confirmation` and supplier hasn't yet confirmed.
 - [x] Supplier view shows "Awaiting agent confirmation" when supplier has confirmed but agent hasn't.
@@ -805,18 +807,25 @@ The supplier can update the allocation at any time. If the custodian balance dro
 
 ### F-064 — Agent borrower creation and loan booking screen
 **Milestone:** M4 (extension)
-**Depends on:** F-018, F-034, F-035, F-038, F-061, F-063
+**Depends on:** F-008, F-018, F-029, F-034, F-035, F-038, F-061, F-063
 **Actor(s):** Agent
 
 **What it does:** Adds two agent-facing surfaces:
 
-- A compact booking strip at the top of `/dashboard/loans`. The strip lets the agent select supplier-published inventory, select an already-approved borrower, enter the minimal booking fields, and submit `POST /loans`.
+- A compact booking strip at the top of `/dashboard/loans`. The strip lets the agent select supplier-published inventory, select an already-approved borrower, review the current market price and supplier-agent agreement guidance, adjust price/LTV/collateral value/margin-call threshold/liquidation threshold, enter the remaining minimal booking fields, and submit `POST /loans`.
 - A borrower management page at `/dashboard/borrowers`. The page lets the agent create borrower records, optionally link a new borrower to an active supplier connection, and view managed borrowers.
 
 **Primary workflow:**
 - Agent opens `/dashboard/loans` directly or from an available-inventory supplier row. The row carries `connection_id` and `asset_type` into the booking strip.
 - Agent selects an existing approved borrower for that supplier connection.
-- Agent enters quantity, rate, term, maturity if fixed, collateral type, collateral quantity, and collateral value in the compact strip.
+- Agent enters quantity, rate, term, maturity if fixed, collateral type, and collateral quantity in the compact strip.
+- The strip defaults asset price from current market data and lets the agent override it.
+- The strip defaults booking LTV from the agreement `initial_ltv_pct` and lets the agent override it.
+- The strip defaults margin call threshold from the agreement `margin_call_ltv_pct` and lets the agent override it.
+- The strip defaults liquidation threshold from the agreement `liquidation_ltv_pct` and lets the agent override it.
+- The strip computes collateral value from `quantity * asset_price_usd * booking_ltv_pct / 100`.
+- If the agent edits collateral value directly, the strip recomputes implied booking LTV.
+- If borrower-loan LTV terms differ from supplier-agent agreement guidance, the strip shows a warning but does not block booking.
 - Submitting calls `POST /loans` and refreshes the loan list.
 - If the borrower is not available, the agent leaves booking and onboards/manages the borrower from `/dashboard/borrowers`.
 
@@ -828,8 +837,15 @@ The supplier can update the allocation at any time. If the custodian balance dro
 - [ ] `/dashboard/borrowers` lets agents create borrower records with `POST /borrowers`.
 - [ ] Creating a borrower with a selected active supplier connection includes `connection_id`, linking the borrower to that supplier connection.
 - [ ] The quantity input shows the effective available quantity for the selected supplier connection and asset.
+- [ ] The ticket defaults asset price from a market-price read endpoint backed by `MarketDataAdapter.get_price(asset_type)` and allows agent override.
+- [ ] The ticket defaults booking LTV from the agreement `initial_ltv_pct` and allows agent override.
+- [ ] The ticket defaults margin call threshold from the agreement `margin_call_ltv_pct` and allows agent override.
+- [ ] The ticket defaults liquidation threshold from the agreement `liquidation_ltv_pct` and allows agent override.
+- [ ] Changing quantity, asset price, or booking LTV recomputes collateral value.
+- [ ] Changing collateral value recomputes implied booking LTV.
+- [ ] If booking LTV, margin call threshold, or liquidation threshold differs from supplier-agent agreement guidance, the ticket shows a warning but allows submission.
 - [ ] Submitting within the remaining published allocation calls `POST /loans` and refreshes the loan list.
-- [ ] API validation errors from booking are surfaced inline, including `"borrower_not_approved"`, `"no_inventory_published"`, `"exceeds_published_inventory"`, `"asset_not_in_scope"`, `"collateral_not_eligible"`, `"ltv_exceeded"`, `"no_active_agreement"`, and `"agreement_not_fully_confirmed"`.
+- [ ] API validation errors from booking are surfaced inline, including `"borrower_not_approved"`, `"no_inventory_published"`, `"exceeds_published_inventory"`, `"asset_not_in_scope"`, `"collateral_not_eligible"`, `"no_active_agreement"`, and `"agreement_not_fully_confirmed"`.
 - [ ] TypeScript compiles with zero errors.
 
 **Out of scope for this feature:** Borrower-facing onboarding; loan matching; automatic custodian settlement initiation at booking; drawer expansion for advanced booking fields.
@@ -845,7 +861,7 @@ The supplier can update the allocation at any time. If the custodian balance dro
 **Depends on:** F-028, F-017
 **Actor(s):** System
 
-**What it does:** Adds the `loans` Alembic migration with all columns per the data model: `id`, `connection_id` (FK), `agreement_id` (FK), `borrower_id` (FK), `asset_type`, `quantity`, `rate_bps`, `term_type` (ENUM: open, fixed), `maturity_date`, `day_count_basis` (ENUM), `collateral_type`, `collateral_quantity`, `collateral_value_usd`, `current_ltv_pct`, `ltv_as_of`, `state` (ENUM: pending, active, margin_call, recall_initiated, settled, defaulted), `booked_at`, `settled_at`.
+**What it does:** Adds the `loans` Alembic migration with all columns per the data model: `id`, `connection_id` (FK), `agreement_id` (FK), `borrower_id` (FK), `asset_type`, `quantity`, `asset_price_usd`, `booking_ltv_pct`, `margin_call_ltv_pct`, `liquidation_ltv_pct`, `rate_bps`, `term_type` (ENUM: open, fixed), `maturity_date`, `day_count_basis` (ENUM), `collateral_type`, `collateral_quantity`, `collateral_value_usd`, `current_ltv_pct`, `ltv_as_of`, `state` (ENUM: pending, active, margin_call, recall_initiated, settled, defaulted), `booked_at`, `settled_at`.
 
 **Acceptance criteria:**
 - [ ] `alembic upgrade head` applies; `downgrade -1` reverses cleanly.
@@ -880,14 +896,18 @@ The supplier can update the allocation at any time. If the custodian balance dro
 **Depends on:** F-033, F-034, F-008, F-005, F-006
 **Actor(s):** Agent
 
-**What it does:** `POST /loans` (agent JWT). Accepts all loan booking fields, runs the five-point validation against agreement terms, checks inventory and collateral via `CustodianAdapter`, creates a `Loan` row with `state=pending`, and sends notifications to both parties.
+**What it does:** `POST /loans` (agent JWT). Accepts all loan booking fields plus the booking asset price and booking LTV used by the agent, runs validation against agreement terms, checks inventory and collateral via `CustodianAdapter`, creates a `Loan` row with `state=pending`, and sends notifications to both parties.
 
 **Acceptance criteria:**
 - [ ] Valid booking returns HTTP 201 with `{ "loan_id": "...", "state": "pending" }`.
 - [ ] Booking with a borrower not on the approved list returns HTTP 422 with code `"borrower_not_approved"`.
 - [ ] Booking with `asset_type` not in `agreement.assets_in_scope` returns HTTP 422 with code `"asset_not_in_scope"`.
 - [ ] Booking with `collateral_type` not in `agreement.eligible_collateral` returns HTTP 422 with code `"collateral_not_eligible"`.
-- [ ] Booking where `collateral_value / (quantity × btc_price)` exceeds `agreement.initial_ltv_pct` returns HTTP 422 with code `"ltv_exceeded"`.
+- [ ] Request includes `asset_price_usd`, `booking_ltv_pct`, `margin_call_ltv_pct`, and `liquidation_ltv_pct`, all positive decimals.
+- [ ] Request validates booking threshold ordering as `0 < booking_ltv_pct < margin_call_ltv_pct < liquidation_ltv_pct`.
+- [ ] Backend computes `collateral_value_usd` from `quantity * asset_price_usd * booking_ltv_pct / 100` unless the request explicitly supplies `collateral_value_usd`.
+- [ ] If `collateral_value_usd` is supplied, backend computes implied `booking_ltv_pct` from `collateral_value_usd / (quantity * asset_price_usd) * 100`.
+- [ ] Booking where `booking_ltv_pct`, `margin_call_ltv_pct`, or `liquidation_ltv_pct` differs from supplier-agent agreement guidance is accepted; the warning is UI-only.
 - [ ] Booking with `quantity` below the agreement minimum returns HTTP 422 with code `"below_minimum_size"`.
 - [ ] Mock inventory check: if `MockCustodianAdapter` is seeded with insufficient BTC, returns HTTP 422 with code `"insufficient_inventory"`.
 - [ ] A `"loan_booked"` notification event is logged for both supplier and agent.
@@ -975,12 +995,12 @@ The supplier can update the allocation at any time. If the custodian balance dro
 **Depends on:** F-036, F-005, F-006
 **Actor(s):** Agent
 
-**What it does:** `POST /loans/{id}/collateral-substitution` (agent JWT). Agent provides new `collateral_type`, `collateral_quantity`, and `collateral_value_usd`. Platform validates the new collateral type is eligible per the agreement and that the resulting LTV meets the initial threshold. Updates the loan's collateral fields and sends a notification.
+**What it does:** `POST /loans/{id}/collateral-substitution` (agent JWT). Agent provides new `collateral_type`, `collateral_quantity`, and `collateral_value_usd`. Platform validates the new collateral type is eligible per the agreement and that the resulting LTV stays within the executed loan's `booking_ltv_pct`. Updates the loan's collateral fields and sends a notification.
 
 **Acceptance criteria:**
 - [ ] Submitting an eligible collateral type with valid LTV returns HTTP 200 and updates the loan's collateral fields.
 - [ ] Submitting an ineligible collateral type returns HTTP 422 with code `"collateral_not_eligible"`.
-- [ ] Submitting collateral that would push LTV over `initial_ltv_pct` returns HTTP 422 with code `"ltv_exceeded"`.
+- [ ] Submitting collateral that would push LTV over `loan.booking_ltv_pct` returns HTTP 422 with code `"ltv_exceeded"`.
 - [ ] Only callable on loans in `active` or `margin_call` state; any other state returns HTTP 409.
 - [ ] A `"collateral_substituted"` notification event is logged.
 
@@ -1034,12 +1054,12 @@ The supplier can update the allocation at any time. If the custodian balance dro
 **Depends on:** F-036, F-007, F-008
 **Actor(s):** System
 
-**What it does:** Extends the `ltv_refresh_job` (F-036) to calculate `current_ltv_pct` for all active loans using `collateral.value_usd / (loan.quantity × btc_price)`, store it with `ltv_as_of` timestamp, and transition loans to `margin_call` state when `current_ltv >= agreement.margin_call_ltv_pct`. Calls `NotificationService` on threshold breach.
+**What it does:** Extends the `ltv_refresh_job` (F-036) to calculate `current_ltv_pct` for all active loans using `collateral.value_usd / (loan.quantity × btc_price)`, store it with `ltv_as_of` timestamp, and transition loans to `margin_call` state when `current_ltv >= loan.margin_call_ltv_pct`. Calls `NotificationService` on threshold breach.
 
 **Acceptance criteria:**
 - [ ] After the job runs, `loan.current_ltv_pct` is updated and `loan.ltv_as_of` reflects the collateral feed's `as_of` timestamp.
-- [ ] A loan whose mock collateral value yields LTV >= `margin_call_ltv_pct` transitions to `margin_call` and a `"margin_call"` notification is logged.
-- [ ] A loan whose LTV is within 10% of `margin_call_ltv_pct` (i.e., `current_ltv >= margin_call_ltv_pct * 0.90`) triggers a `"ltv_warning"` notification without changing state.
+- [ ] A loan whose mock collateral value yields LTV >= `loan.margin_call_ltv_pct` transitions to `margin_call` and a `"margin_call"` notification is logged.
+- [ ] A loan whose LTV is within 10% of `loan.margin_call_ltv_pct` (i.e., `current_ltv >= loan.margin_call_ltv_pct * 0.90`) triggers a `"ltv_warning"` notification without changing state.
 - [ ] A loan already in `margin_call` state does not trigger a duplicate notification on re-run.
 - [ ] Job is idempotent for loans whose LTV has not changed.
 

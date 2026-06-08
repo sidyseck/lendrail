@@ -29,6 +29,7 @@ class AgreementTermsInput:
     eligible_collateral: list[str]
     initial_ltv_pct: Decimal
     margin_call_ltv_pct: Decimal
+    liquidation_ltv_pct: Decimal
     recall_notice_days: int
     max_loan_days: int
     day_count_basis: str
@@ -46,6 +47,7 @@ class AgreementResult:
     eligible_collateral: list[str]
     initial_ltv_pct: Decimal
     margin_call_ltv_pct: Decimal
+    liquidation_ltv_pct: Decimal
     recall_notice_days: int
     max_loan_days: int
     day_count_basis: str
@@ -70,6 +72,7 @@ def _to_result(a) -> AgreementResult:
         eligible_collateral=list(a.eligible_collateral),
         initial_ltv_pct=Decimal(str(a.initial_ltv_pct)),
         margin_call_ltv_pct=Decimal(str(a.margin_call_ltv_pct)),
+        liquidation_ltv_pct=Decimal(str(a.liquidation_ltv_pct)),
         recall_notice_days=a.recall_notice_days,
         max_loan_days=a.max_loan_days,
         day_count_basis=a.day_count_basis,
@@ -146,6 +149,7 @@ class AgreementService:
             eligible_collateral=data.eligible_collateral,
             initial_ltv_pct=data.initial_ltv_pct,
             margin_call_ltv_pct=data.margin_call_ltv_pct,
+            liquidation_ltv_pct=data.liquidation_ltv_pct,
             recall_notice_days=data.recall_notice_days,
             max_loan_days=data.max_loan_days,
             day_count_basis=data.day_count_basis,
@@ -311,6 +315,7 @@ class AgreementService:
             eligible_collateral=data.eligible_collateral,
             initial_ltv_pct=data.initial_ltv_pct,
             margin_call_ltv_pct=data.margin_call_ltv_pct,
+            liquidation_ltv_pct=data.liquidation_ltv_pct,
             recall_notice_days=data.recall_notice_days,
             max_loan_days=data.max_loan_days,
             day_count_basis=data.day_count_basis,

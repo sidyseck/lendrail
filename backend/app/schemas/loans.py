@@ -30,12 +30,16 @@ class LoanBookingRequest(BaseModel):
     borrower_id: uuid.UUID
     asset_type: str = Field(min_length=1)
     quantity: Decimal = Field(gt=0)
+    asset_price_usd: Decimal = Field(gt=0)
+    booking_ltv_pct: Decimal = Field(gt=0)
+    margin_call_ltv_pct: Decimal = Field(gt=0)
+    liquidation_ltv_pct: Decimal = Field(gt=0)
     rate_bps: int = Field(ge=0)
     term_type: Literal["open", "fixed"]
     maturity_date: date | None = None
     collateral_type: str = Field(min_length=1)
     collateral_quantity: Decimal = Field(gt=0)
-    collateral_value_usd: Decimal = Field(gt=0)
+    collateral_value_usd: Decimal | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def fixed_term_requires_maturity(self) -> "LoanBookingRequest":
@@ -43,6 +47,8 @@ class LoanBookingRequest(BaseModel):
             raise ValueError("fixed-term loans require maturity_date")
         if self.term_type == "open" and self.maturity_date is not None:
             raise ValueError("open-term loans must not include maturity_date")
+        if self.liquidation_ltv_pct <= self.margin_call_ltv_pct:
+            raise ValueError("liquidation_ltv_pct must be greater than margin_call_ltv_pct")
         return self
 
 
@@ -59,6 +65,10 @@ class LoanResponse(BaseModel):
     borrower_name: str
     asset_type: str
     quantity: str
+    asset_price_usd: str
+    booking_ltv_pct: str
+    margin_call_ltv_pct: str
+    liquidation_ltv_pct: str
     rate_bps: int
     term_type: str
     maturity_date: date | None
@@ -81,6 +91,12 @@ class LoanResponse(BaseModel):
 
 class LoanListResponse(BaseModel):
     loans: list[LoanResponse]
+
+
+class MarketPriceResponse(BaseModel):
+    asset_type: str
+    price_usd: str
+    as_of: datetime
 
 
 class CollateralSubstitutionRequest(BaseModel):

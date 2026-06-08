@@ -146,6 +146,8 @@ Down-revision: `0010`
 
 M4 adds the `loans` table from `FEATURES.md` plus the minimum nullable operational columns needed by F-036, F-039, and F-041. It can also add `connection_approved_borrowers` in the same migration because F-035 depends on both the loan table and approved borrower list.
 
+Implementation note for the current checkout: `0011_loan_lifecycle.py` already exists, and `0012_connection_inventory_scope.py` is already head before PRD-D-002. Apply PRD-D-002 schema additions through a new forward migration (`0013_loan_booking_terms.py`) rather than rewriting historical migrations.
+
 ```sql
 CREATE TYPE loan_term_type_enum AS ENUM ('open', 'fixed');
 CREATE TYPE loan_state_enum AS ENUM (
@@ -164,6 +166,10 @@ CREATE TABLE loans (
   borrower_id                UUID NOT NULL REFERENCES borrowers(id) ON DELETE RESTRICT,
   asset_type                 TEXT NOT NULL,
   quantity                   NUMERIC(28, 12) NOT NULL,
+  asset_price_usd            NUMERIC(28, 8) NOT NULL,
+  booking_ltv_pct            NUMERIC(10, 4) NOT NULL,
+  margin_call_ltv_pct        NUMERIC(10, 4) NOT NULL,
+  liquidation_ltv_pct        NUMERIC(10, 4) NOT NULL,
   rate_bps                   INTEGER NOT NULL,
   term_type                  loan_term_type_enum NOT NULL,
   maturity_date              DATE,
@@ -269,6 +275,10 @@ class Loan(Base):
     borrower_id: Mapped[uuid.UUID]
     asset_type: Mapped[str]
     quantity: Mapped[Decimal]
+    asset_price_usd: Mapped[Decimal]
+    booking_ltv_pct: Mapped[Decimal]
+    margin_call_ltv_pct: Mapped[Decimal]
+    liquidation_ltv_pct: Mapped[Decimal]
     rate_bps: Mapped[int]
     term_type: Mapped[str]
     maturity_date: Mapped[date | None]
@@ -390,24 +400,45 @@ class LoanBookingRequest(BaseModel):
     borrower_id: UUID
     asset_type: str
     quantity: Decimal
+    asset_price_usd: Decimal
+    booking_ltv_pct: Decimal
+    margin_call_ltv_pct: Decimal
+    liquidation_ltv_pct: Decimal
     rate_bps: int
     term_type: Literal["open", "fixed"]
     maturity_date: date | None = None
     collateral_type: str
     collateral_quantity: Decimal
-    collateral_value_usd: Decimal
+    collateral_value_usd: Decimal | None = None
 ```
 
 Pydantic validations:
 
 - `quantity > 0`
+- `asset_price_usd > 0`
+- `booking_ltv_pct > 0`
+- `margin_call_ltv_pct > booking_ltv_pct`
+- `liquidation_ltv_pct > margin_call_ltv_pct`
 - `rate_bps >= 0`
 - `collateral_quantity > 0`
-- `collateral_value_usd >= 0`
+- `collateral_value_usd > 0` when provided
 - `term_type == "fixed"` requires `maturity_date`
 - `term_type == "open"` ignores/rejects `maturity_date`; choose reject with 422 `validation_error` for cleaner input contracts
 
 `day_count_basis` is not accepted from the client; it is copied from the active agreement.
+
+If `collateral_value_usd` is omitted, derive it from:
+
+```text
+quantity * asset_price_usd * booking_ltv_pct / 100
+```
+
+If `collateral_value_usd` is provided, treat the provided collateral value as
+the source of truth and recompute implied `booking_ltv_pct` from:
+
+```text
+collateral_value_usd / (quantity * asset_price_usd) * 100
+```
 
 ### 6.3 Responses
 
@@ -424,6 +455,10 @@ class LoanResponse(BaseModel):
     borrower_name: str
     asset_type: str
     quantity: str
+    asset_price_usd: str
+    booking_ltv_pct: str
+    margin_call_ltv_pct: str
+    liquidation_ltv_pct: str
     rate_bps: int
     term_type: LoanTermType
     maturity_date: date | None
@@ -534,7 +569,33 @@ Response: HTTP 200:
 { "connection_id": "...", "borrower_id": "...", "removed": true }
 ```
 
-### 7.2 F-035/F-038 booking
+### 7.2 F-064 market price read endpoint
+
+The booking ticket needs a current market-price default before the loan exists.
+Add a small read endpoint backed by `MarketDataAdapter.get_price(asset_type)`.
+
+#### `GET /market-data/prices/{asset_type}`
+
+Auth: agent or supplier JWT.
+
+Response:
+
+```json
+{
+  "asset_type": "BTC",
+  "price_usd": "65000.00",
+  "as_of": "2026-06-08T12:00:00Z"
+}
+```
+
+Implementation notes:
+
+- Use the existing `MarketDataAdapter` dependency.
+- Serialize `price_usd` as a string.
+- Return 404 or 422 for unsupported asset types according to adapter behavior; the mock adapter may support any asset type with a deterministic price for MVP.
+- This endpoint is a UI default source only. `POST /loans` remains authoritative for the submitted `asset_price_usd`, because agents may override the default.
+
+### 7.3 F-035/F-038 booking
 
 #### `POST /loans`
 
@@ -557,13 +618,15 @@ Validation order matters because tests should assert specific machine codes:
 
 Implementation ruling for this checkout: add `minimum_loan_size` only if a prior M3 delta already introduced it before M4 work starts. If it is still absent, do not silently invent it in M4; document a `SPEC_DELTAS.md` entry and skip only that assertion.
 
-9. Use `MarketDataAdapter.get_price(asset_type)` for the loan asset price.
-10. Calculate agreement-defined LTV exactly as `collateral_value_usd / (quantity * asset_price_usd) * 100`.
-11. If calculated LTV exceeds `agreement.initial_ltv_pct`, return 422 `ltv_exceeded`.
-12. Call `CustodianAdapter.get_inventory(account_ref)` and verify available `asset_type` quantity is sufficient; otherwise 422 `insufficient_inventory`.
-13. Create `Loan(state="pending")`, copy `agreement.day_count_basis`, set `current_ltv_pct` and `ltv_as_of` from market data time.
-14. Record transition audit with `from_state=None`, `to_state="pending"`, `reason="loan_booked"`.
-15. Notify both parties with `loan_booked`.
+9. Validate `asset_price_usd > 0`, `margin_call_ltv_pct > 0`, and `liquidation_ltv_pct > 0`. The UI defaults `asset_price_usd` from `MarketDataAdapter.get_price(asset_type)`, but the backend accepts the submitted price because the agent may override it.
+10. If `collateral_value_usd` is omitted, derive it from `quantity * asset_price_usd * booking_ltv_pct / 100`.
+11. If `collateral_value_usd` is provided, recompute implied `booking_ltv_pct` from `collateral_value_usd / (quantity * asset_price_usd) * 100` and persist the implied value.
+12. After any implied booking LTV recomputation, validate booking threshold ordering as `0 < booking_ltv_pct < margin_call_ltv_pct < liquidation_ltv_pct`.
+13. Do **not** reject bookings solely because `booking_ltv_pct`, `margin_call_ltv_pct`, or `liquidation_ltv_pct` differ from supplier-agent agreement guidance; that difference is a UI warning, not a backend blocker. The supplier-agent agreement terms are defaults/guidance for the borrower-loan ticket, while the loan row stores the executed borrower-loan terms.
+14. Call `CustodianAdapter.get_inventory(account_ref)` and verify available `asset_type` quantity is sufficient; otherwise 422 `insufficient_inventory`.
+15. Create `Loan(state="pending")`, copy `agreement.day_count_basis`, persist `asset_price_usd`, `booking_ltv_pct`, `margin_call_ltv_pct`, `liquidation_ltv_pct`, and `collateral_value_usd`, set `current_ltv_pct=booking_ltv_pct`, and set `ltv_as_of` to request processing time unless a market-data timestamp is explicitly supplied by a later contract.
+16. Record transition audit with `from_state=None`, `to_state="pending"`, `reason="loan_booked"`.
+17. Notify both parties with `loan_booked`.
 
 Response: HTTP 201:
 
@@ -664,7 +727,7 @@ Service logic:
 3. Loan state must be `active` or `margin_call`; otherwise 409 `invalid_loan_state`.
 4. New `collateral_type` must be in agreement `eligible_collateral`; otherwise 422 `collateral_not_eligible`.
 5. Recalculate agreement-defined LTV using the same formula as booking and latest market price for `loan.asset_type`.
-6. If calculated LTV exceeds `agreement.initial_ltv_pct`, return 422 `ltv_exceeded`.
+6. If calculated LTV exceeds `loan.booking_ltv_pct`, return 422 `ltv_exceeded`.
 7. Update `collateral_type`, `collateral_quantity`, `collateral_value_usd`, `current_ltv_pct`, and `ltv_as_of`.
 8. Record a transition audit row with `from_state=loan.state`, `to_state=loan.state`, `reason="collateral_substituted"`.
 9. Notify both parties with `collateral_substituted`.
@@ -818,7 +881,7 @@ No new Protocol method is required for M4 unless implementation discovers accoun
 
 Market data:
 
-- Use `MarketDataAdapter.get_price(asset_type)` for booking, activation, and collateral substitution LTV calculations.
+- Use `MarketDataAdapter.get_price(asset_type)` for the market-price read endpoint, activation, and collateral substitution LTV calculations. Booking stores the submitted `asset_price_usd`, because the agent can override the ticket default.
 - Mock market data should default BTC to a stable deterministic value and be seedable per test.
 
 ---
@@ -856,7 +919,9 @@ Market data:
 - Borrower not approved -> 422 `borrower_not_approved`.
 - Asset not in scope -> 422 `asset_not_in_scope`.
 - Collateral not eligible -> 422 `collateral_not_eligible`.
-- LTV exceeds initial threshold -> 422 `ltv_exceeded`.
+- Booking LTV, margin call threshold, or liquidation threshold different from supplier-agent agreement guidance -> 201 plus stored executed loan terms; UI warning only.
+- Submitted `collateral_value_usd` recomputes implied `booking_ltv_pct`.
+- Omitted `collateral_value_usd` derives collateral value from quantity, submitted price, and submitted booking LTV.
 - Insufficient inventory -> 422 `insufficient_inventory`.
 - Fixed term without maturity -> 422 `validation_error`.
 - Notifications include `loan_booked` for both orgs.
@@ -938,13 +1003,14 @@ Required functions:
 ```ts
 getLoans(state?: LoanState): Promise<Loan[]>
 getLoan(loanId: string): Promise<Loan>
+bookLoan(body: LoanBookingRequest): Promise<LoanCreateResponse>
 recallLoan(loanId: string): Promise<RecallResponse>
 returnLoan(loanId: string): Promise<ReturnResponse>
 substituteCollateral(loanId: string, body: CollateralSubstitutionRequest): Promise<Loan>
 defaultLoan(loanId: string): Promise<DefaultResponse>
 ```
 
-Frontend F-042 does not need to expose `POST /loans` booking unless a booking UI is explicitly added later. F-042 is lifecycle UI for existing loans.
+F-064 explicitly adds booking UI; `bookLoan()` is required once F-064 is in scope.
 
 ### 12.3 Types
 
@@ -967,6 +1033,10 @@ export interface Loan {
   borrower_name: string;
   asset_type: string;
   quantity: string;
+  asset_price_usd: string;
+  booking_ltv_pct: string;
+  margin_call_ltv_pct: string;
+  liquidation_ltv_pct: string;
   rate_bps: number;
   term_type: 'open' | 'fixed';
   maturity_date: string | null;
@@ -984,6 +1054,30 @@ export interface Loan {
   return_custodian_ref: string | null;
   return_instruction_at: string | null;
   settled_at: string | null;
+}
+```
+
+```ts
+export interface LoanBookingRequest {
+  connection_id: string;
+  borrower_id: string;
+  asset_type: string;
+  quantity: string;
+  asset_price_usd: string;
+  booking_ltv_pct: string;
+  margin_call_ltv_pct: string;
+  liquidation_ltv_pct: string;
+  rate_bps: number;
+  term_type: 'open' | 'fixed';
+  maturity_date: string | null;
+  collateral_type: string;
+  collateral_quantity: string;
+  collateral_value_usd?: string | null;
+}
+
+export interface LoanCreateResponse {
+  loan_id: string;
+  state: LoanState;
 }
 ```
 
@@ -1008,12 +1102,40 @@ Reuse existing badge/button/card primitives and styling conventions. Keep text c
 
 Required UI:
 
+- Agent-only compact booking strip at the top when F-064 is enabled.
 - Table of loans.
 - State segmented/filter control using `GET /loans?state=...`.
 - State badge per row.
 - Borrower name, asset/quantity, collateral value, current LTV, booked date.
 - Row click or "View" button routes to detail.
 - Loading, empty, and error states.
+
+#### `BookLoanStrip` - F-064
+
+This is a compact ticket, not a full page. It appears above the loan list for agent users.
+
+Required UI:
+
+- Inventory selector populated from available inventory rows. When the agent arrives from `/dashboard/available-inventory`, read `connection_id` and `asset_type` query params to preselect the row.
+- Approved borrower selector populated from `GET /connections/{connection_id}/approved-borrowers`.
+- Link to `/dashboard/borrowers` when the desired borrower is missing.
+- Quantity.
+- Asset price, defaulted from `MarketDataAdapter.get_price(asset_type)` through the backend/market-price API contract once available; until that endpoint exists, use the booking wrapper's current market-price source/mocked value.
+- Booking LTV, defaulted from latest active agreement `initial_ltv_pct`.
+- Collateral value, derived from `quantity * asset_price_usd * booking_ltv_pct / 100`.
+- If collateral value is edited directly, recompute implied booking LTV.
+- Margin call threshold, defaulted from agreement `margin_call_ltv_pct` and editable for the borrower loan.
+- Liquidation threshold, defaulted from agreement `liquidation_ltv_pct` and editable for the borrower loan.
+- Short inline warning when booking LTV, margin call threshold, or liquidation threshold differs from supplier-agent agreement guidance. Warning does not block submission.
+- Rate, term type, maturity date when fixed, collateral type, and collateral quantity.
+- Submit calls `POST /loans`; success refreshes loan list.
+
+Design constraints:
+
+- Keep the ticket one compact horizontal work area on desktop.
+- Do not create borrowers inline.
+- Do not show long explanatory text in-app. Use labels and warning copy only.
+- Future drawer expansion is allowed but out of scope for the current implementation.
 
 #### `LoanDetailPage`
 
@@ -1086,7 +1208,7 @@ Recommended for M4 MVP: option 1, because F-035 does not specify custodian selec
 
 ### 13.3 LTV formula naming
 
-`FEATURES.md` defines the M4/M5 calculation as `collateral_value_usd / (quantity * asset_price_usd) * 100` and compares it to `initial_ltv_pct` / `margin_call_ltv_pct`. That is closer to a collateralization ratio than conventional LTV. M4 should implement the formula as written for acceptance-test alignment, but code comments should call it "agreement-defined LTV" to avoid future confusion.
+`FEATURES.md` defines the M4/M5 calculation as `collateral_value_usd / (quantity * asset_price_usd) * 100` and compares it to loan thresholds (`booking_ltv_pct`, `margin_call_ltv_pct`, and `liquidation_ltv_pct`). That is closer to a collateralization ratio than conventional LTV. M4 should implement the formula as written for product-contract alignment, but code comments should call it "agreement-defined LTV" to avoid future confusion. At booking time, supplier-agent agreement thresholds are defaults/guidance only; the loan row stores the executed borrower-loan thresholds, and lifecycle risk workflows use those loan thresholds as operational triggers.
 
 ---
 

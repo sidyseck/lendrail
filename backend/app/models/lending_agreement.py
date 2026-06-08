@@ -30,6 +30,7 @@ class LendingAgreement(Base):
     eligible_collateral: Mapped[list] = mapped_column(ARRAY(sa.Text), nullable=False)
     initial_ltv_pct: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False)
     margin_call_ltv_pct: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False)
+    liquidation_ltv_pct: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False)
     recall_notice_days: Mapped[int] = mapped_column(Integer, nullable=False)
     max_loan_days: Mapped[int] = mapped_column(Integer, nullable=False)
     day_count_basis: Mapped[str] = mapped_column(

@@ -72,6 +72,7 @@ CREATE TABLE lending_agreements (
   eligible_collateral     TEXT[] NOT NULL,
   initial_ltv_pct         NUMERIC(10,4) NOT NULL,
   margin_call_ltv_pct     NUMERIC(10,4) NOT NULL,
+  liquidation_ltv_pct     NUMERIC(10,4) NOT NULL,
   recall_notice_days      INTEGER NOT NULL,
   max_loan_days           INTEGER NOT NULL,
   day_count_basis         day_count_basis_enum NOT NULL,
@@ -90,6 +91,8 @@ CREATE INDEX ix_lending_agreements_connection_id ON lending_agreements(connectio
 
 **Versioning invariant:** The row with the highest `version` for a given `connection_id` is the "current" agreement. All historical rows are retained (never deleted). Enforced at the application layer, not via a DB constraint.
 
+**Borrower-loan defaulting:** `initial_ltv_pct`, `margin_call_ltv_pct`, and `liquidation_ltv_pct` are supplier-agent agreement terms. M4 loan booking uses them as defaults/guidance for borrower loans, but the executed loan stores its own LTV thresholds.
+
 ### 2.2 API endpoints
 
 All agreement endpoints live in `app/api/routers/agreements.py`, registered at `/` in `main.py`.
@@ -107,6 +110,7 @@ Creates a new agreement for an active connection.
   "eligible_collateral": ["ETH", "USDC"],
   "initial_ltv_pct": 70.0,
   "margin_call_ltv_pct": 80.0,
+  "liquidation_ltv_pct": 90.0,
   "recall_notice_days": 5,
   "max_loan_days": 90,
   "day_count_basis": "actual_360",
@@ -117,6 +121,7 @@ Creates a new agreement for an active connection.
 **Validations (Pydantic + service layer):**
 - `initial_ltv_pct`: `0 < x < 100`
 - `margin_call_ltv_pct`: `0 < x < 100` and must exceed `initial_ltv_pct`
+- `liquidation_ltv_pct`: `0 < x < 100` and must exceed `margin_call_ltv_pct`
 - `recall_notice_days`, `max_loan_days`: `>= 1`
 - `agent_fee_bps`: `0–10000`
 - Connection must have `status = active` → 409 `connection_not_active`
@@ -226,6 +231,7 @@ class AgreementResult:
     eligible_collateral: list[str]
     initial_ltv_pct: Decimal
     margin_call_ltv_pct: Decimal
+    liquidation_ltv_pct: Decimal
     recall_notice_days: int
     max_loan_days: int
     day_count_basis: str
@@ -252,6 +258,7 @@ class AgreementResponse(BaseModel):
     eligible_collateral: list[str]
     initial_ltv_pct: str        # Decimal as string
     margin_call_ltv_pct: str    # Decimal as string
+    liquidation_ltv_pct: str    # Decimal as string
     recall_notice_days: int
     max_loan_days: int
     day_count_basis: str
@@ -297,6 +304,7 @@ class AgreementResponse(BaseModel):
 - Eligible Collateral (comma-separated text input)
 - Initial LTV % (number, 0–100)
 - Margin Call LTV % (number, must exceed Initial LTV)
+- Liquidation LTV % (number, must exceed Margin Call LTV)
 - Recall Notice Days (integer, ≥1)
 - Max Loan Days (integer, ≥1)
 - Day Count Basis (select: actual_360 / actual_365)

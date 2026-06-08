@@ -4,7 +4,8 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.deps import get_current_user, get_loan_service
+from app.adapters.interfaces import MarketDataAdapter
+from app.api.deps import get_current_user, get_loan_service, get_market_data_adapter
 from app.api.rbac import require_role
 from app.schemas.auth import AuthUser
 from app.schemas.loans import (
@@ -17,6 +18,7 @@ from app.schemas.loans import (
     LoanListResponse,
     LoanResponse,
     LoanState,
+    MarketPriceResponse,
 )
 from app.services.loan_service import (
     CollateralSubstitutionInput,
@@ -36,6 +38,10 @@ def _loan_response(result) -> LoanResponse:
         borrower_name=result.borrower_name,
         asset_type=result.asset_type,
         quantity=str(result.quantity),
+        asset_price_usd=str(result.asset_price_usd),
+        booking_ltv_pct=str(result.booking_ltv_pct),
+        margin_call_ltv_pct=str(result.margin_call_ltv_pct),
+        liquidation_ltv_pct=str(result.liquidation_ltv_pct),
         rate_bps=result.rate_bps,
         term_type=result.term_type,
         maturity_date=result.maturity_date,
@@ -126,15 +132,41 @@ async def book_loan(
             borrower_id=body.borrower_id,
             asset_type=body.asset_type,
             quantity=Decimal(str(body.quantity)),
+            asset_price_usd=Decimal(str(body.asset_price_usd)),
+            booking_ltv_pct=Decimal(str(body.booking_ltv_pct)),
+            margin_call_ltv_pct=Decimal(str(body.margin_call_ltv_pct)),
+            liquidation_ltv_pct=Decimal(str(body.liquidation_ltv_pct)),
             rate_bps=body.rate_bps,
             term_type=body.term_type,
             maturity_date=body.maturity_date,
             collateral_type=body.collateral_type,
             collateral_quantity=Decimal(str(body.collateral_quantity)),
-            collateral_value_usd=Decimal(str(body.collateral_value_usd)),
+            collateral_value_usd=(
+                Decimal(str(body.collateral_value_usd))
+                if body.collateral_value_usd is not None
+                else None
+            ),
         ),
     )
     return LoanCreateResponse(loan_id=result.id, state=result.state)
+
+
+@router.get("/market-data/prices/{asset_type}", response_model=MarketPriceResponse)
+async def get_market_price(
+    asset_type: str,
+    caller: AuthUser = Depends(get_current_user),
+    market_data: MarketDataAdapter = Depends(get_market_data_adapter),
+) -> MarketPriceResponse:
+    if caller.role not in ("supplier", "agent"):
+        from app.core.errors import Forbidden
+
+        raise Forbidden("Only suppliers and agents can view market prices")
+    price = await market_data.get_price(asset_type)
+    return MarketPriceResponse(
+        asset_type=price.asset_type,
+        price_usd=str(Decimal(str(price.price_usd))),
+        as_of=price.as_of,
+    )
 
 
 @router.get("/loans", response_model=LoanListResponse)

@@ -34,12 +34,16 @@ class LoanBookingInput:
     borrower_id: uuid.UUID
     asset_type: str
     quantity: Decimal
+    asset_price_usd: Decimal
+    booking_ltv_pct: Decimal
+    margin_call_ltv_pct: Decimal
+    liquidation_ltv_pct: Decimal
     rate_bps: int
     term_type: TermType
     maturity_date: date | None
     collateral_type: str
     collateral_quantity: Decimal
-    collateral_value_usd: Decimal
+    collateral_value_usd: Decimal | None
 
 
 @dataclass
@@ -67,6 +71,10 @@ class LoanResult:
     borrower_name: str
     asset_type: str
     quantity: Decimal
+    asset_price_usd: Decimal
+    booking_ltv_pct: Decimal
+    margin_call_ltv_pct: Decimal
+    liquidation_ltv_pct: Decimal
     rate_bps: int
     term_type: str
     maturity_date: date | None
@@ -91,6 +99,31 @@ def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
 
 
+def _derive_collateral_value(quantity: Decimal, asset_price_usd: Decimal, booking_ltv_pct: Decimal) -> Decimal:
+    return quantity * asset_price_usd * booking_ltv_pct / Decimal("100")
+
+
+def _derive_booking_ltv(collateral_value_usd: Decimal, quantity: Decimal, asset_price_usd: Decimal) -> Decimal:
+    return collateral_value_usd / (quantity * asset_price_usd) * Decimal("100")
+
+
+def _validate_executed_thresholds(
+    booking_ltv_pct: Decimal, margin_call_ltv_pct: Decimal, liquidation_ltv_pct: Decimal
+) -> None:
+    if booking_ltv_pct <= 0:
+        raise ValidationError("booking_ltv_pct must be greater than 0", code="invalid_ltv_thresholds")
+    if margin_call_ltv_pct <= booking_ltv_pct:
+        raise ValidationError(
+            "margin_call_ltv_pct must be greater than booking_ltv_pct",
+            code="invalid_ltv_thresholds",
+        )
+    if liquidation_ltv_pct <= margin_call_ltv_pct:
+        raise ValidationError(
+            "liquidation_ltv_pct must be greater than margin_call_ltv_pct",
+            code="invalid_ltv_thresholds",
+        )
+
+
 def _to_result(loan, borrower_name: str) -> LoanResult:
     return LoanResult(
         id=loan.id,
@@ -100,6 +133,10 @@ def _to_result(loan, borrower_name: str) -> LoanResult:
         borrower_name=borrower_name,
         asset_type=loan.asset_type,
         quantity=_decimal(loan.quantity),
+        asset_price_usd=_decimal(loan.asset_price_usd),
+        booking_ltv_pct=_decimal(loan.booking_ltv_pct),
+        margin_call_ltv_pct=_decimal(loan.margin_call_ltv_pct),
+        liquidation_ltv_pct=_decimal(loan.liquidation_ltv_pct),
         rate_bps=loan.rate_bps,
         term_type=loan.term_type,
         maturity_date=loan.maturity_date,
@@ -251,11 +288,21 @@ class LoanService:
             if data.maturity_date > max_maturity:
                 raise ValidationError("Loan maturity exceeds agreement max loan days", code="max_loan_days_exceeded")
 
-        price = await self.market_data.get_price(data.asset_type)
-        loan_value = data.quantity * _decimal(price.price_usd)
-        ltv = (data.collateral_value_usd / loan_value) * Decimal("100")
-        if ltv > _decimal(agreement.initial_ltv_pct):
-            raise ValidationError("Initial LTV exceeds agreement threshold", code="ltv_exceeded")
+        collateral_value_usd = (
+            _derive_collateral_value(data.quantity, data.asset_price_usd, data.booking_ltv_pct)
+            if data.collateral_value_usd is None
+            else data.collateral_value_usd
+        )
+        booking_ltv_pct = (
+            data.booking_ltv_pct
+            if data.collateral_value_usd is None
+            else _derive_booking_ltv(collateral_value_usd, data.quantity, data.asset_price_usd)
+        )
+        _validate_executed_thresholds(
+            booking_ltv_pct,
+            data.margin_call_ltv_pct,
+            data.liquidation_ltv_pct,
+        )
 
         scope: dict[str, str] = connection.inventory_scope or {}
         published_raw = scope.get(data.asset_type)
@@ -287,7 +334,7 @@ class LoanService:
 
         collateral_ref = str(data.borrower_id)
         collateral = await self.custodian.get_collateral(collateral_ref)
-        if collateral is not None and _decimal(collateral.value_usd) < data.collateral_value_usd:
+        if collateral is not None and _decimal(collateral.value_usd) < collateral_value_usd:
             raise ValidationError("Insufficient collateral at custodian", code="insufficient_collateral")
 
         loan = await self.loans.create(
@@ -297,14 +344,19 @@ class LoanService:
             borrower_id=data.borrower_id,
             asset_type=data.asset_type,
             quantity=data.quantity,
+            asset_price_usd=data.asset_price_usd,
+            booking_ltv_pct=booking_ltv_pct,
+            margin_call_ltv_pct=data.margin_call_ltv_pct,
+            liquidation_ltv_pct=data.liquidation_ltv_pct,
             rate_bps=data.rate_bps,
             term_type=data.term_type,
             maturity_date=data.maturity_date,
             day_count_basis=agreement.day_count_basis,
             collateral_type=data.collateral_type,
             collateral_quantity=data.collateral_quantity,
-            collateral_value_usd=data.collateral_value_usd,
-            current_ltv_pct=ltv,
+            collateral_value_usd=collateral_value_usd,
+            current_ltv_pct=booking_ltv_pct,
+            ltv_as_of=datetime.now(timezone.utc),
             state="pending",
         )
         await self.transitions.record(
@@ -423,8 +475,8 @@ class LoanService:
             raise ValidationError("Collateral is not eligible for this agreement", code="collateral_not_eligible")
         price = await self.market_data.get_price(loan.asset_type)
         ltv = (data.collateral_value_usd / (_decimal(loan.quantity) * _decimal(price.price_usd))) * Decimal("100")
-        if ltv > _decimal(agreement.initial_ltv_pct):
-            raise ValidationError("Initial LTV exceeds agreement threshold", code="ltv_exceeded")
+        if ltv > _decimal(loan.booking_ltv_pct):
+            raise ValidationError("Substitution LTV exceeds executed loan threshold", code="ltv_exceeded")
         loan = await self.loans.update(
             loan,
             collateral_type=data.collateral_type,

@@ -71,6 +71,10 @@ class Loan(Base):
     )
     asset_type: Mapped[str] = mapped_column(Text(), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(28, 12), nullable=False)
+    asset_price_usd: Mapped[Decimal] = mapped_column(Numeric(28, 8), nullable=False)
+    booking_ltv_pct: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    margin_call_ltv_pct: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    liquidation_ltv_pct: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
     rate_bps: Mapped[int] = mapped_column(Integer, nullable=False)
     term_type: Mapped[str] = mapped_column(
         sa.Enum("open", "fixed", name="loan_term_type_enum", create_type=False),

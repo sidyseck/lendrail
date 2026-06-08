@@ -16,6 +16,7 @@ class AgreementTermsRequest(BaseModel):
     eligible_collateral: list[str] = Field(..., min_length=1)
     initial_ltv_pct: Decimal = Field(..., gt=0, lt=100)
     margin_call_ltv_pct: Decimal = Field(..., gt=0, lt=100)
+    liquidation_ltv_pct: Decimal = Field(..., gt=0, lt=100)
     recall_notice_days: int = Field(..., ge=1)
     max_loan_days: int = Field(..., ge=1)
     day_count_basis: Literal["actual_360", "actual_365"]
@@ -26,6 +27,10 @@ class AgreementTermsRequest(BaseModel):
         if self.margin_call_ltv_pct <= self.initial_ltv_pct:
             raise ValueError(
                 "margin_call_ltv_pct must be greater than initial_ltv_pct"
+            )
+        if self.liquidation_ltv_pct <= self.margin_call_ltv_pct:
+            raise ValueError(
+                "liquidation_ltv_pct must be greater than margin_call_ltv_pct"
             )
         return self
 
@@ -42,6 +47,7 @@ class AgreementResponse(BaseModel):
     eligible_collateral: list[str]
     initial_ltv_pct: str       # Decimal serialized as string to avoid float precision issues
     margin_call_ltv_pct: str
+    liquidation_ltv_pct: str
     recall_notice_days: int
     max_loan_days: int
     day_count_basis: str

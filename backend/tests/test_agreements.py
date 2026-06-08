@@ -21,6 +21,7 @@ _VALID_TERMS = {
     "eligible_collateral": ["CASH_USD"],
     "initial_ltv_pct": "70.0000",
     "margin_call_ltv_pct": "80.0000",
+    "liquidation_ltv_pct": "90.0000",
     "recall_notice_days": 3,
     "max_loan_days": 30,
     "day_count_basis": "actual_360",
@@ -161,6 +162,7 @@ class TestAgreementSchema:
                 eligible_collateral=["CASH"],
                 initial_ltv_pct=Decimal("80"),
                 margin_call_ltv_pct=Decimal("50"),
+                liquidation_ltv_pct=Decimal("90"),
                 recall_notice_days=3,
                 max_loan_days=30,
                 day_count_basis="actual_360",
@@ -176,6 +178,7 @@ class TestAgreementSchema:
                 eligible_collateral=["CASH"],
                 initial_ltv_pct=Decimal("70"),
                 margin_call_ltv_pct=Decimal("70"),
+                liquidation_ltv_pct=Decimal("90"),
                 recall_notice_days=3,
                 max_loan_days=30,
                 day_count_basis="actual_360",
@@ -191,6 +194,7 @@ class TestAgreementSchema:
                 eligible_collateral=["CASH"],
                 initial_ltv_pct=Decimal("0"),
                 margin_call_ltv_pct=Decimal("10"),
+                liquidation_ltv_pct=Decimal("90"),
                 recall_notice_days=3,
                 max_loan_days=30,
                 day_count_basis="actual_360",
@@ -206,6 +210,7 @@ class TestAgreementSchema:
                 eligible_collateral=["CASH"],
                 initial_ltv_pct=Decimal("100"),
                 margin_call_ltv_pct=Decimal("110"),
+                liquidation_ltv_pct=Decimal("120"),
                 recall_notice_days=3,
                 max_loan_days=30,
                 day_count_basis="actual_360",
@@ -219,6 +224,7 @@ class TestAgreementSchema:
             eligible_collateral=["CASH"],
             initial_ltv_pct=Decimal("70"),
             margin_call_ltv_pct=Decimal("80"),
+            liquidation_ltv_pct=Decimal("90"),
             recall_notice_days=3,
             max_loan_days=30,
             day_count_basis="actual_365",
@@ -240,6 +246,7 @@ class TestAgreementServiceUnit:
         a.eligible_collateral = kwargs.get("eligible_collateral", ["CASH"])
         a.initial_ltv_pct = kwargs.get("initial_ltv_pct", Decimal("70.0000"))
         a.margin_call_ltv_pct = kwargs.get("margin_call_ltv_pct", Decimal("80.0000"))
+        a.liquidation_ltv_pct = kwargs.get("liquidation_ltv_pct", Decimal("90.0000"))
         a.recall_notice_days = kwargs.get("recall_notice_days", 3)
         a.max_loan_days = kwargs.get("max_loan_days", 30)
         a.day_count_basis = kwargs.get("day_count_basis", "actual_360")
@@ -301,6 +308,7 @@ class TestAgreementServiceUnit:
             eligible_collateral=["CASH"],
             initial_ltv_pct=Decimal("70"),
             margin_call_ltv_pct=Decimal("80"),
+            liquidation_ltv_pct=Decimal("90"),
             recall_notice_days=3,
             max_loan_days=30,
             day_count_basis="actual_360",
@@ -344,6 +352,7 @@ class TestAgreementServiceUnit:
             eligible_collateral=["CASH"],
             initial_ltv_pct=Decimal("70"),
             margin_call_ltv_pct=Decimal("80"),
+            liquidation_ltv_pct=Decimal("90"),
             recall_notice_days=3,
             max_loan_days=30,
             day_count_basis="actual_360",
@@ -494,6 +503,7 @@ class TestAgreementServiceUnit:
             eligible_collateral=["CASH"],
             initial_ltv_pct=Decimal("70"),
             margin_call_ltv_pct=Decimal("80"),
+            liquidation_ltv_pct=Decimal("90"),
             recall_notice_days=3,
             max_loan_days=30,
             day_count_basis="actual_360",
@@ -544,6 +554,7 @@ class TestAgreementServiceUnit:
             eligible_collateral=["CASH"],
             initial_ltv_pct=Decimal("60"),
             margin_call_ltv_pct=Decimal("75"),
+            liquidation_ltv_pct=Decimal("85"),
             recall_notice_days=5,
             max_loan_days=45,
             day_count_basis="actual_365",
@@ -580,6 +591,8 @@ async def test_0009_migration_applies(test_engine: AsyncEngine) -> None:
             text("SELECT typname FROM pg_type WHERE typname = 'day_count_basis_enum'")
         )
         assert result.scalar() == "day_count_basis_enum"
+        columns = await conn.run_sync(lambda c: inspect(c).get_columns("lending_agreements"))
+        assert "liquidation_ltv_pct" in {column["name"] for column in columns}
 
 
 @pytest.mark.asyncio
@@ -590,9 +603,9 @@ async def test_lending_agreement_connection_id_fk(db_session: AsyncSession) -> N
             text(
                 "INSERT INTO lending_agreements "
                 "(id, connection_id, version, assets_in_scope, eligible_collateral, "
-                "initial_ltv_pct, margin_call_ltv_pct, recall_notice_days, max_loan_days, "
+                "initial_ltv_pct, margin_call_ltv_pct, liquidation_ltv_pct, recall_notice_days, max_loan_days, "
                 "day_count_basis, agent_fee_bps) "
-                "VALUES (:id, :conn_id, 1, '{AAPL}', '{CASH}', 70.0, 80.0, 3, 30, 'actual_360', 50)"
+                "VALUES (:id, :conn_id, 1, '{AAPL}', '{CASH}', 70.0, 80.0, 90.0, 3, 30, 'actual_360', 50)"
             ),
             {"id": str(uuid.uuid4()), "conn_id": str(uuid.uuid4())},
         )
@@ -626,9 +639,9 @@ async def test_day_count_basis_enum_constraint(db_session: AsyncSession) -> None
             text(
                 "INSERT INTO lending_agreements "
                 "(id, connection_id, version, assets_in_scope, eligible_collateral, "
-                "initial_ltv_pct, margin_call_ltv_pct, recall_notice_days, max_loan_days, "
+                "initial_ltv_pct, margin_call_ltv_pct, liquidation_ltv_pct, recall_notice_days, max_loan_days, "
                 "day_count_basis, agent_fee_bps) "
-                "VALUES (:id, :conn_id, 1, '{AAPL}', '{CASH}', 70.0, 80.0, 3, 30, 'invalid_basis', 50)"
+                "VALUES (:id, :conn_id, 1, '{AAPL}', '{CASH}', 70.0, 80.0, 90.0, 3, 30, 'invalid_basis', 50)"
             ),
             {"id": str(uuid.uuid4()), "conn_id": conn_id},
         )
@@ -661,9 +674,9 @@ async def test_lending_agreement_array_columns(db_session: AsyncSession) -> None
         text(
             "INSERT INTO lending_agreements "
             "(id, connection_id, version, assets_in_scope, eligible_collateral, "
-            "initial_ltv_pct, margin_call_ltv_pct, recall_notice_days, max_loan_days, "
+            "initial_ltv_pct, margin_call_ltv_pct, liquidation_ltv_pct, recall_notice_days, max_loan_days, "
             "day_count_basis, agent_fee_bps) "
-            "VALUES (:id, :conn_id, 1, ARRAY['AAPL','MSFT'], ARRAY['CASH_USD'], 70.0, 80.0, 3, 30, 'actual_360', 50)"
+            "VALUES (:id, :conn_id, 1, ARRAY['AAPL','MSFT'], ARRAY['CASH_USD'], 70.0, 80.0, 90.0, 3, 30, 'actual_360', 50)"
         ),
         {"id": agr_id, "conn_id": conn_id},
     )
@@ -694,6 +707,7 @@ async def test_create_agreement_201(client: AsyncClient, active_connection: dict
     assert body["confirmed_by_agent_at"] is None
     assert body["status"] == "pending_confirmation"
     assert body["day_count_basis"] == "actual_360"
+    assert body["liquidation_ltv_pct"] == "90.0000"
     assert "agreement_id" in body
 
 
@@ -746,6 +760,21 @@ async def test_create_agreement_margin_call_lte_initial_422(
     bad = dict(_VALID_TERMS)
     bad["margin_call_ltv_pct"] = "50.0"
     bad["initial_ltv_pct"] = "60.0"
+    resp = await client.post(
+        f"/connections/{active_connection['connection_id']}/agreement",
+        json=bad,
+        headers=active_connection["agent"]["headers"],
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "validation_error"
+
+
+@pytest.mark.asyncio
+async def test_create_agreement_liquidation_lte_margin_call_422(
+    client: AsyncClient, active_connection: dict
+) -> None:
+    bad = dict(_VALID_TERMS)
+    bad["liquidation_ltv_pct"] = "80.0"
     resp = await client.post(
         f"/connections/{active_connection['connection_id']}/agreement",
         json=bad,
