@@ -6,7 +6,7 @@ import structlog
 
 # Keys whose values must never appear in logs
 _SECRET_KEYS = frozenset(
-    {"password", "api_key", "hashed_password", "token", "secret", "jwt_secret", "access_token"}
+    {"password", "api_key", "hashed_password", "token", "secret", "jwt_secret", "access_token", "plaintext_key"}
 )
 
 

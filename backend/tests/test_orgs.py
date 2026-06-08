@@ -222,15 +222,18 @@ async def test_user_org_fk_enforced(db_session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_user_null_org_id_allowed(db_session: AsyncSession) -> None:
-    """After 0003, inserting user with null org_id succeeds (FK allows NULL)."""
-    await db_session.execute(
-        text(
-            "INSERT INTO users (id, org_id, email, hashed_password, role) "
-            "VALUES (:id, NULL, :email, 'hash', 'supplier')"
-        ),
-        {"id": str(uuid.uuid4()), "email": f"u-null-{uuid.uuid4().hex}@example.com"},
-    )
-    await db_session.flush()
+    """After M2 migration 0005, inserting user with null org_id raises IntegrityError (NOT NULL)."""
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+    with pytest.raises(IntegrityError):
+        await db_session.execute(
+            text(
+                "INSERT INTO users (id, org_id, email, hashed_password, role) "
+                "VALUES (:id, NULL, :email, 'hash', 'supplier')"
+            ),
+            {"id": str(uuid.uuid4()), "email": f"u-null-{uuid.uuid4().hex}@example.com"},
+        )
+        await db_session.flush()
 
 
 # ── F-013: Supplier registration tests ────────────────────────────────────────
@@ -502,15 +505,15 @@ async def test_get_me_invalid_token_401(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_get_me_no_org_id_403(client: AsyncClient) -> None:
-    """M0 seed user (null org_id in JWT) → 403."""
+    """M2 gate: token with null org_id (pre-M1 token) → 401 token_missing_org_id."""
     token = create_access_token(
         user_id=str(uuid.uuid4()),
         org_id=None,
         role="supplier",
     )
     resp = await client.get("/orgs/me", headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code == 403
-    assert resp.json()["error"]["code"] == "forbidden"
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "token_missing_org_id"
 
 
 @pytest.mark.asyncio

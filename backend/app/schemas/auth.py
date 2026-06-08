@@ -33,5 +33,5 @@ class AuthUser:
     A frozen dataclass — not a Pydantic model — so services never depend on web types."""
 
     user_id: UUID
-    org_id: UUID | None
+    org_id: UUID          # Non-nullable post-M2 gate (was UUID | None in M1)
     role: Role

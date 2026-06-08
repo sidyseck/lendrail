@@ -25,9 +25,12 @@ from app.secrets.interface import SecretStore
 from app.repositories.user_repository import UserRepository  # moved in M1 (Decision 6)
 from app.repositories.org_repository import OrgRepository
 from app.repositories.borrower_repository import BorrowerRepository
+from app.repositories.custodian_link_repository import CustodianLinkRepository
+from app.repositories.connection_repository import ConnectionRepository
 from app.services.auth_service import AuthService
 from app.services.org_service import OrgService
 from app.services.borrower_service import BorrowerService
+from app.services.connection_service import ConnectionService
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -42,9 +45,12 @@ async def get_current_user(authorization: str = Header(default="")) -> AuthUser:
         claims = decode_access_token(token)
     except PyJWTError:
         raise AuthError("invalid_token")
+    raw_org_id = claims.get("org_id")
+    if not raw_org_id:
+        raise AuthError("Pre-M1 token; org_id is missing", code="token_missing_org_id")   # Pre-M1 token; reject cleanly.
     return AuthUser(
         user_id=UUID(claims["sub"]),
-        org_id=UUID(claims["org_id"]) if claims.get("org_id") else None,
+        org_id=UUID(raw_org_id),
         role=claims["role"],
     )
 
@@ -97,5 +103,24 @@ def get_borrower_service(session: SessionDep) -> BorrowerService:
     notifier = ConsoleNotificationAdapter(NotificationRepository(session))
     return BorrowerService(
         borrowers=BorrowerRepository(session),
+        notifier=notifier,
+    )
+
+
+# ---- connection service ----
+
+
+def get_connection_service(
+    session: SessionDep,
+    secret_store: SecretStore = Depends(get_secret_store),
+    custodian_adapter: CustodianAdapter = Depends(get_custodian_adapter),
+) -> ConnectionService:
+    notifier = ConsoleNotificationAdapter(NotificationRepository(session))
+    return ConnectionService(
+        connections=ConnectionRepository(session),
+        custodian_links=CustodianLinkRepository(session),
+        orgs=OrgRepository(session),
+        secret_store=secret_store,
+        custodian_adapter=custodian_adapter,
         notifier=notifier,
     )

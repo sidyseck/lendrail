@@ -40,7 +40,7 @@ TEST_DATABASE_URL = os.environ["DATABASE_URL"]
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ALEMBIC_INI = os.path.join(BACKEND_DIR, "alembic.ini")
 
-_TABLES_TO_TRUNCATE = ["notifications", "borrowers", "users", "organizations"]
+_TABLES_TO_TRUNCATE = ["notifications", "borrowers", "connections", "custodian_links", "users", "organizations"]
 
 
 def _run_alembic(*args: str) -> None:
@@ -151,20 +151,49 @@ def app() -> FastAPI:
 
 
 async def _insert_user(email: str, password: str, role: str) -> User:
-    """Insert a user directly into the test DB."""
+    """Insert an org + user directly into the test DB (org_id required after M2 migration 0005)."""
+    from sqlalchemy import text as sa_text
+    from app.models.organization import Organization
+
+    org_role = role if role in ("supplier", "agent") else "supplier"
     engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
     factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-    user = User(
-        id=uuid.uuid4(),
-        email=email,
-        hashed_password=hash_password(password),
-        role=role,
-    )
+    org_id = uuid.uuid4()
+    user_id = uuid.uuid4()
     async with factory() as session:
-        session.add(user)
+        await session.execute(
+            sa_text(
+                "INSERT INTO organizations (id, name, jurisdiction, entity_type, role, contact_email, status) "
+                "VALUES (:id, :name, 'Test Jurisdiction', 'fund', :role, :email, 'approved')"
+            ),
+            {"id": str(org_id), "name": f"Test Org {org_id}", "role": org_role, "email": f"org-{org_id}@example.com"},
+        )
+        await session.execute(
+            sa_text(
+                "INSERT INTO users (id, email, hashed_password, role, org_id) "
+                "VALUES (:id, :email, :hashed_password, :role, :org_id)"
+            ),
+            {
+                "id": str(user_id),
+                "email": email,
+                "hashed_password": hash_password(password),
+                "role": role,
+                "org_id": str(org_id),
+            },
+        )
         await session.commit()
-        await session.refresh(user)
+    # Fetch the user back
+    async with factory() as session:
+        result = await session.execute(sa_text("SELECT * FROM users WHERE id = :id"), {"id": str(user_id)})
+        row = result.mappings().one()
     await engine.dispose()
+    user = User(
+        id=uuid.UUID(str(row["id"])),
+        email=row["email"],
+        hashed_password=row["hashed_password"],
+        role=row["role"],
+        org_id=uuid.UUID(str(row["org_id"])),
+    )
     return user
 
 
