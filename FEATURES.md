@@ -808,27 +808,31 @@ The supplier can update the allocation at any time. If the custodian balance dro
 **Depends on:** F-018, F-034, F-035, F-038, F-061, F-063
 **Actor(s):** Agent
 
-**What it does:** React page for the agent to create/select a borrower and book a loan against inventory published by a supplier. The screen starts from the agent's available inventory view and carries forward the selected supplier connection, asset type, and effective available quantity.
+**What it does:** Adds two agent-facing surfaces:
+
+- A compact booking strip at the top of `/dashboard/loans`. The strip lets the agent select supplier-published inventory, select an already-approved borrower, enter the minimal booking fields, and submit `POST /loans`.
+- A borrower management page at `/dashboard/borrowers`. The page lets the agent create borrower records, optionally link a new borrower to an active supplier connection, and view managed borrowers.
 
 **Primary workflow:**
-- Agent opens `/dashboard/book-loan` from an available-inventory supplier row.
-- Agent selects an existing approved borrower for that supplier connection or creates a new borrower inline with `POST /borrowers`.
-- If a new borrower is created, the request includes `connection_id` so the borrower is added to that supplier connection's approved list and becomes visible to the supplier.
-- Agent enters quantity, rate, term, maturity if fixed, collateral type, collateral quantity, and collateral value.
-- Submitting calls `POST /loans`.
+- Agent opens `/dashboard/loans` directly or from an available-inventory supplier row. The row carries `connection_id` and `asset_type` into the booking strip.
+- Agent selects an existing approved borrower for that supplier connection.
+- Agent enters quantity, rate, term, maturity if fixed, collateral type, collateral quantity, and collateral value in the compact strip.
+- Submitting calls `POST /loans` and refreshes the loan list.
+- If the borrower is not available, the agent leaves booking and onboards/manages the borrower from `/dashboard/borrowers`.
 
 **Acceptance criteria:**
-- [ ] The page is accessible to agents only.
-- [ ] The page can be opened from an available-inventory row with `connection_id` and `asset_type` preselected.
+- [ ] `/dashboard/loans` shows the compact booking strip to agents above the loan list.
+- [ ] Available-inventory rows link to `/dashboard/loans` with `connection_id` and `asset_type` preselected.
 - [ ] Existing borrowers are loaded from `GET /connections/{id}/approved-borrowers`.
-- [ ] Creating a borrower inline calls `POST /borrowers` with `connection_id` and adds the new borrower to the borrower selector without a borrower invite step.
-- [ ] Supplier can see the newly linked borrower through `GET /connections/{id}/approved-borrowers`.
+- [ ] The booking strip does not create borrowers inline; it links to `/dashboard/borrowers` when the borrower is missing.
+- [ ] `/dashboard/borrowers` lets agents create borrower records with `POST /borrowers`.
+- [ ] Creating a borrower with a selected active supplier connection includes `connection_id`, linking the borrower to that supplier connection.
 - [ ] The quantity input shows the effective available quantity for the selected supplier connection and asset.
-- [ ] Submitting within the remaining published allocation calls `POST /loans` and routes to the loan detail page.
+- [ ] Submitting within the remaining published allocation calls `POST /loans` and refreshes the loan list.
 - [ ] API validation errors from booking are surfaced inline, including `"borrower_not_approved"`, `"no_inventory_published"`, `"exceeds_published_inventory"`, `"asset_not_in_scope"`, `"collateral_not_eligible"`, `"ltv_exceeded"`, `"no_active_agreement"`, and `"agreement_not_fully_confirmed"`.
 - [ ] TypeScript compiles with zero errors.
 
-**Out of scope for this feature:** Borrower-facing onboarding; loan matching; automatic custodian settlement initiation at booking.
+**Out of scope for this feature:** Borrower-facing onboarding; loan matching; automatic custodian settlement initiation at booking; drawer expansion for advanced booking fields.
 
 ---
 

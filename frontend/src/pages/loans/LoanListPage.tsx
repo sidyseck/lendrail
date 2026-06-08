@@ -41,23 +41,8 @@ export function LoanListPage() {
   }, [filter]);
 
   useEffect(() => {
-    let cancelled = false;
-    setIsLoading(true);
-    setError(null);
-    listLoans(filter || undefined)
-      .then((rows) => {
-        if (!cancelled) setLoans(rows);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load loans.');
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [filter]);
+    void loadLoans();
+  }, [loadLoans]);
 
   return (
     <div>
