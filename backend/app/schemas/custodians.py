@@ -19,3 +19,15 @@ class CustodianResponse(BaseModel):
 
 class CustodianListResponse(BaseModel):
     custodians: list[CustodianResponse]
+
+
+class CustodianInventoryPosition(BaseModel):
+    asset_type: str
+    quantity: str
+    as_of: str
+
+
+class CustodianInventoryResponse(BaseModel):
+    custodian_link_id: UUID
+    account_ref: str
+    positions: list[CustodianInventoryPosition]

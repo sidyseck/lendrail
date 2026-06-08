@@ -2,9 +2,10 @@
 import logging
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 
-from app.adapters.interfaces import CustodianAdapter
-from app.core.errors import Forbidden, ValidationError
+from app.adapters.interfaces import CustodianAdapter, InventoryPosition
+from app.core.errors import Forbidden, NotFoundError, ValidationError
 from app.repositories.custodian_link_repository import CustodianLinkRepository
 from app.schemas.auth import AuthUser
 from app.secrets.interface import SecretStore
@@ -17,6 +18,20 @@ class RegisterCustodianInput:
     custodian_id: str
     account_ref: str
     plaintext_key: str
+
+
+@dataclass
+class CustodianInventoryPositionResult:
+    asset_type: str
+    quantity: Decimal
+    as_of: str
+
+
+@dataclass
+class CustodianInventoryResult:
+    custodian_link_id: uuid.UUID
+    account_ref: str
+    positions: list[CustodianInventoryPositionResult]
 
 
 @dataclass
@@ -107,3 +122,27 @@ class CustodianService:
             raise Forbidden("Caller has no associated organization")
         links = await self.custodian_links.list_by_org(caller.org_id)
         return [_to_result(link) for link in links]
+
+    async def get_inventory(
+        self, caller: AuthUser, custodian_link_id: uuid.UUID
+    ) -> CustodianInventoryResult:
+        if caller.role != "supplier":
+            raise Forbidden("Only suppliers can view custodian inventory")
+        link = await self.custodian_links.get(custodian_link_id)
+        if link.org_id != caller.org_id:
+            raise Forbidden("This custodian link does not belong to your organization")
+        raw_positions: list[InventoryPosition] = await self.custodian_adapter.get_inventory(
+            link.account_ref
+        )
+        return CustodianInventoryResult(
+            custodian_link_id=link.id,
+            account_ref=link.account_ref,
+            positions=[
+                CustodianInventoryPositionResult(
+                    asset_type=p.asset_type,
+                    quantity=Decimal(str(p.quantity)),
+                    as_of=p.as_of.isoformat(),
+                )
+                for p in raw_positions
+            ],
+        )

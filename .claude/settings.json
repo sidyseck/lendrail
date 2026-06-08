@@ -6,7 +6,12 @@
       "Bash(curl -s http://localhost:8000/healthz)",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\([p for p in d['paths'].keys\\(\\) if 'custodian' in p or 'connection' in p]\\)\")",
       "Bash(npx vitest *)",
-      "Bash(awk '/## M3/,/## M4/' /Users/sidyseck/github/lendrail-1/FEATURES.md)"
+      "Bash(awk '/## M3/,/## M4/' /Users/sidyseck/github/lendrail-1/FEATURES.md)",
+      "Bash(git -C /Users/sidyseck/github/lendrail-1 log --oneline -10)",
+      "Bash(git -C /Users/sidyseck/github/lendrail-1 status --short)",
+      "Bash(python -m pytest tests/test_inventory_scope.py -v --tb=short)",
+      "Bash(python3 -m pytest --version)",
+      "Bash(uv --version)"
     ]
   }
 }

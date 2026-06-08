@@ -4,6 +4,7 @@ import { registerHandlers } from './handlers/register';
 import { connectionsHandlers } from './handlers/connections';
 import { agreementsHandlers } from './handlers/agreements';
 import { custodiansHandlers } from './handlers/custodians';
+import { notificationsHandlers } from './handlers/notifications';
 
 export const server = setupServer(
   ...authHandlers,
@@ -11,4 +12,5 @@ export const server = setupServer(
   ...connectionsHandlers,
   ...agreementsHandlers,
   ...custodiansHandlers,
+  ...notificationsHandlers,
 );

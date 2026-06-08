@@ -4,6 +4,7 @@ import { registerHandlers } from './handlers/register';
 import { connectionsHandlers } from './handlers/connections';
 import { agreementsHandlers } from './handlers/agreements';
 import { custodiansHandlers } from './handlers/custodians';
+import { notificationsHandlers } from './handlers/notifications';
 
 export const worker = setupWorker(
   ...authHandlers,
@@ -11,4 +12,5 @@ export const worker = setupWorker(
   ...connectionsHandlers,
   ...agreementsHandlers,
   ...custodiansHandlers,
+  ...notificationsHandlers,
 );

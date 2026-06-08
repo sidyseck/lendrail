@@ -733,6 +733,65 @@ The supplier can update the allocation at any time. If the custodian balance dro
 
 ---
 
+### F-062 — Supplier inventory management screen
+**Milestone:** M2 (extension)
+**Depends on:** F-061, F-024, F-026, F-046
+**Actor(s):** Supplier
+
+**What it does:** React page at `/dashboard/inventory`. The supplier sees their full asset estate in one place: which custodian holds what (pulled from the custodian inventory feed), how much has been published to each active agent connection, and how much of what was published is currently on loan. The supplier can edit published quantities inline — per asset, per connection — without leaving the screen.
+
+**Three sections:**
+- **Section A — Custodian positions (read-only):** One row per custodian × asset type. Columns: custodian name, account ref, asset type, total balance, as-of timestamp. Reuses the staleness flag pattern from F-046 when the feed is beyond the staleness threshold.
+- **Section B — Per-agent allocation panels:** One panel per active or suspended connection. Per row (asset type): total at custodian, published quantity, on-loan quantity, remaining available (`published − on_loan`).
+- **Section C — Inline allocation controls:** Increase quantity (takes effect immediately), reduce quantity (warning if below on-loan amount, not blocked), set to zero (confirmation prompt: "This will block new bookings for [asset] on this connection").
+
+**Acceptance criteria:**
+- [ ] `/dashboard/inventory` is accessible from the main nav (supplier only).
+- [ ] Section A shows one row per `(custodian, asset_type)` from the custodian inventory feed; rows with stale feeds show a staleness indicator.
+- [ ] Section B shows one panel per active or suspended connection; pending and terminated connections are not shown.
+- [ ] Each panel row shows published quantity, on-loan quantity, and remaining available per asset.
+- [ ] Editing published quantity and saving calls `PUT /connections/{id}/inventory-scope` and reflects the change immediately (optimistic update or refetch).
+- [ ] Reducing below on-loan quantity shows an inline warning but does not block the save.
+- [ ] Setting to zero shows a confirmation prompt before saving.
+- [ ] A connection with no published inventory shows "No inventory published. Click + to publish."
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** Loan-level detail (Risk Cockpit, F-046); fee accrual (F-057); aggregating balances across custodian accounts for the same asset.
+
+---
+
+### F-063 — Agent available inventory screen
+**Milestone:** M2 (extension)
+**Depends on:** F-061, F-048, F-026
+**Actor(s):** Agent
+
+**What it does:** React page at `/dashboard/available-inventory`. The agent sees how much lending capacity they have access to — total per asset type aggregated across all active supplier connections, then broken down by supplier. When a supplier changes their allocation for a connection this agent is on, the affected row is highlighted and a nav badge appears.
+
+**Two sections:**
+- **Section A — Aggregated totals:** One row per asset type. Columns: asset type, total available (sum of `effective_available` across all active connections), on loan, net remaining.
+- **Section B — Breakdown by supplier:** One row per active connection × asset type where `effective_available > 0`. Columns: supplier name, asset type, available from this supplier, on loan via this supplier. The agent does **not** see custodian balance or raw published quantity — only `effective_available`.
+
+**In-screen allocation change notifications:**
+- When `ConnectionService.set_inventory_scope()` fires the `supplier_allocation_changed` in-app notification (F-048), the affected supplier row in Section B is highlighted with an "Updated X min ago" chip.
+- A badge count on the `/dashboard/available-inventory` nav link reflects unacknowledged allocation changes.
+- Visiting the screen (or clicking the affected row) clears the badge and removes the highlight.
+- The in-app notification payload: `{ supplier_org_id, connection_id, asset_type, new_effective_available }`.
+
+**Acceptance criteria:**
+- [ ] `/dashboard/available-inventory` is accessible from the main nav (agent only).
+- [ ] Section A shows one row per asset type with correct aggregated totals.
+- [ ] Section B shows one row per active connection × asset type where `effective_available > 0`; connections with no published inventory are omitted.
+- [ ] Supplier's total custodian balance is **not** shown anywhere on this screen.
+- [ ] Supplier's raw published quantity is **not** shown (only `effective_available`).
+- [ ] When a supplier changes their allocation, the affected Section B row is highlighted with a relative timestamp chip.
+- [ ] The nav badge count reflects the number of unacknowledged allocation changes.
+- [ ] Visiting the screen clears the badge and removes highlights.
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** Real-time WebSocket updates; historical allocation change audit log; cross-program aggregation for the same asset across multiple custodian accounts.
+
+---
+
 ## M4 — Loan Lifecycle
 
 ---
@@ -1254,7 +1313,7 @@ The supplier can update the allocation at any time. If the custodian balance dro
 |---|---|
 | M0 — Foundation | F-001, F-002, F-003, F-004, F-005, F-006, F-007, F-008, F-009, F-010, F-060 |
 | M1 — Onboarding | F-011, F-012, F-013, F-014, F-015, F-016, F-017, F-018, F-019, F-058 |
-| M2 — Connection | F-020, F-021, F-022, F-023, F-024, F-025, F-026, F-027, F-061 |
+| M2 — Connection | F-020, F-021, F-022, F-023, F-024, F-025, F-026, F-027, F-061, F-062, F-063 |
 | M3 — Agreement | F-028, F-029, F-030, F-031, F-032 |
 | M4 — Loan lifecycle | F-033, F-034, F-035, F-036, F-037, F-038, F-039, F-040, F-041, F-042 |
 | M5 — Risk monitoring | F-043, F-044, F-045, F-046, F-047, F-048 |

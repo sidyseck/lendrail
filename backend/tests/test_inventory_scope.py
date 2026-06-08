@@ -1,4 +1,5 @@
 """F-061 inventory scope tests."""
+import asyncio
 import inspect as pyinspect
 import uuid
 from decimal import Decimal
@@ -6,8 +7,8 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy import inspect as sa_inspect, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.adapters.mock_custodian import MockCustodianAdapter
 from app.api.deps import get_custodian_adapter
@@ -338,3 +339,176 @@ async def test_booked_quantity_subtracts_from_inventory_scope(
 def test_book_loan_uses_connection_row_lock() -> None:
     source = pyinspect.getsource(LoanService.book_loan)
     assert "self.connections.get_for_update(data.connection_id)" in source
+
+
+@pytest.mark.asyncio
+async def test_set_inventory_scope_wrong_supplier_forbidden(inventory_client: AsyncClient) -> None:
+    setup = await _connection_setup(inventory_client)
+    other_supplier = await _register_supplier(inventory_client)
+    resp = await inventory_client.put(
+        f"/connections/{setup['connection_id']}/inventory-scope",
+        json={"scope": {"BTC": "50.0"}},
+        headers=other_supplier["headers"],
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_set_inventory_scope_empty_dict_accepted(inventory_client: AsyncClient) -> None:
+    setup = await _connection_setup(inventory_client)
+    resp = await inventory_client.put(
+        f"/connections/{setup['connection_id']}/inventory-scope",
+        json={"scope": {}},
+        headers=setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200
+
+    resp = await inventory_client.get(
+        f"/connections/{setup['connection_id']}/inventory",
+        headers=setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200
+    # Custodian assets still appear but all show published_quantity=0 and effective_available=0
+    for entry in resp.json()["entries"]:
+        assert entry["published_quantity"] == "0"
+        assert entry["effective_available"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_set_inventory_scope_any_asset_type_accepted(inventory_client: AsyncClient) -> None:
+    setup = await _connection_setup(inventory_client)
+    resp = await inventory_client.put(
+        f"/connections/{setup['connection_id']}/inventory-scope",
+        json={"scope": {"ETH": "50.0", "USDC": "1000000.0", "SOL": "2500.5"}},
+        headers=setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200
+
+    resp = await inventory_client.get(
+        f"/connections/{setup['connection_id']}/inventory",
+        headers=setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200
+    asset_types = {e["asset_type"] for e in resp.json()["entries"]}
+    assert "ETH" in asset_types
+    assert "USDC" in asset_types
+    assert "SOL" in asset_types
+
+
+@pytest.mark.asyncio
+async def test_set_inventory_scope_suspended_connection_allowed(inventory_client: AsyncClient) -> None:
+    setup = await _connection_setup(inventory_client)
+    resp = await inventory_client.post(
+        f"/connections/{setup['connection_id']}/suspend",
+        headers=setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200
+
+    resp = await inventory_client.put(
+        f"/connections/{setup['connection_id']}/inventory-scope",
+        json={"scope": {"BTC": "75.0"}},
+        headers=setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_book_loan_exact_boundary_succeeds(inventory_client: AsyncClient) -> None:
+    setup = await _connection_setup(inventory_client)
+    await _publish(inventory_client, setup, {"BTC": "100.0"})
+
+    resp = await inventory_client.post(
+        "/loans",
+        json=_booking(setup, quantity="100.0"),
+        headers=setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_book_loan_settled_loans_not_counted(
+    inventory_client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    setup = await _connection_setup(inventory_client)
+    await _publish(inventory_client, setup, {"BTC": "100.0"})
+
+    resp = await inventory_client.post(
+        "/loans",
+        json=_booking(setup, quantity="70.0"),
+        headers=setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    loan_id = resp.json()["loan_id"]
+
+    # Advance to settled directly — avoids threading through the full recall/return flow
+    await db_session.execute(
+        text("UPDATE loans SET state = 'settled' WHERE id = :id"),
+        {"id": loan_id},
+    )
+    await db_session.commit()
+
+    # The settled loan should not count; 100 BTC should now be fully available again
+    resp = await inventory_client.post(
+        "/loans",
+        json=_booking(setup, quantity="100.0"),
+        headers=setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+async def test_book_loan_defaulted_loans_not_counted(
+    inventory_client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    setup = await _connection_setup(inventory_client)
+    await _publish(inventory_client, setup, {"BTC": "100.0"})
+
+    resp = await inventory_client.post(
+        "/loans",
+        json=_booking(setup, quantity="60.0"),
+        headers=setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    loan_id = resp.json()["loan_id"]
+
+    await db_session.execute(
+        text("UPDATE loans SET state = 'defaulted' WHERE id = :id"),
+        {"id": loan_id},
+    )
+    await db_session.commit()
+
+    resp = await inventory_client.post(
+        "/loans",
+        json=_booking(setup, quantity="100.0"),
+        headers=setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+async def test_book_loan_concurrent_requests_do_not_oversubscribe(
+    inventory_client: AsyncClient,
+) -> None:
+    setup = await _connection_setup(inventory_client)
+    await _publish(inventory_client, setup, {"BTC": "100.0"})
+
+    payload = _booking(setup, quantity="70.0")
+    headers = setup["agent"]["headers"]
+
+    results = await asyncio.gather(
+        inventory_client.post("/loans", json=payload, headers=headers),
+        inventory_client.post("/loans", json=payload, headers=headers),
+        return_exceptions=True,
+    )
+
+    responses = [r for r in results if not isinstance(r, Exception)]
+    statuses = [r.status_code for r in responses]
+
+    assert statuses.count(201) == 1, f"Expected exactly 1 success; got statuses {statuses}"
+    assert statuses.count(422) == 1
+
+    failed = next(r for r in responses if r.status_code == 422)
+    assert failed.json()["error"]["code"] == "exceeds_published_inventory"

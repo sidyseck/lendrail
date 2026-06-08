@@ -13,6 +13,8 @@ import { AgreementHistoryPage } from './pages/agreements/AgreementHistoryPage';
 import { CustodiansPage } from './pages/CustodiansPage';
 import { LoanListPage } from './pages/loans/LoanListPage';
 import { LoanDetailPage } from './pages/loans/LoanDetailPage';
+import { SupplierInventoryPage } from './pages/inventory/SupplierInventoryPage';
+import { AgentAvailableInventoryPage } from './pages/inventory/AgentAvailableInventoryPage';
 
 export default function App() {
   return (
@@ -45,6 +47,10 @@ export default function App() {
             <Route path="loans/:loanId" element={<LoanDetailPage />} />
             {/* Supplier-only custodian management */}
             <Route path="custodians" element={<CustodiansPage />} />
+            {/* F-062: Supplier inventory management */}
+            <Route path="inventory" element={<SupplierInventoryPage />} />
+            {/* F-063: Agent available inventory */}
+            <Route path="available-inventory" element={<AgentAvailableInventoryPage />} />
           </Route>
 
           {/* Default redirect */}

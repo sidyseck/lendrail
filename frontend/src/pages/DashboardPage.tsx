@@ -1,5 +1,6 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthContext';
+import { useAllocationNotifications } from '@/hooks/useAllocationNotifications';
 
 export function DashboardPage() {
   const { role, logout } = useAuth();
@@ -8,6 +9,10 @@ export function DashboardPage() {
   const onLoans = location.pathname.startsWith('/dashboard/loans');
   const onOrganization = location.pathname.startsWith('/dashboard/organization');
   const onCustodians = location.pathname.startsWith('/dashboard/custodians');
+  const onInventory = location.pathname.startsWith('/dashboard/inventory');
+  const onAvailableInventory = location.pathname.startsWith('/dashboard/available-inventory');
+
+  const { badgeCount } = useAllocationNotifications(onAvailableInventory);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -42,6 +47,28 @@ export function DashboardPage() {
                 className={`text-sm ${onCustodians ? 'font-semibold text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}
               >
                 Custodians
+              </Link>
+            )}
+            {role === 'supplier' && (
+              <Link
+                to="/dashboard/inventory"
+                className={`text-sm ${onInventory ? 'font-semibold text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}
+              >
+                Inventory
+              </Link>
+            )}
+            {role === 'agent' && (
+              <Link
+                to="/dashboard/available-inventory"
+                className={`relative text-sm ${onAvailableInventory ? 'font-semibold text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}
+                aria-label="Available Inventory"
+              >
+                Available Inventory
+                {badgeCount > 0 && (
+                  <span className="absolute -right-3 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-medium text-white">
+                    {badgeCount > 9 ? '9+' : badgeCount}
+                  </span>
+                )}
               </Link>
             )}
             {role && (

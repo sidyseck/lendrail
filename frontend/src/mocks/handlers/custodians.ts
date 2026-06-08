@@ -3,6 +3,7 @@
 import { delay, http, HttpResponse } from 'msw';
 import { mockError } from '../helpers';
 import type { CustodianLink } from '@/api/custodiansApi';
+import type { CustodianInventoryResponse } from '@/api/inventoryApi';
 
 const SUPPLIER_ORG_ID = 'org-001';
 
@@ -22,6 +23,27 @@ let mockCustodians: CustodianLink[] = [...INITIAL_CUSTODIANS.map((c) => ({ ...c 
 export function resetMockCustodians(): void {
   mockCustodians = [...INITIAL_CUSTODIANS.map((c) => ({ ...c }))];
 }
+
+const STALE_THRESHOLD_MS = 3_600_000; // 1 hour — matches VITE_FEED_STALENESS_THRESHOLD_SECONDS default
+
+const MOCK_INVENTORY: Record<string, CustodianInventoryResponse> = {
+  'clink-001': {
+    custodian_link_id: 'clink-001',
+    account_ref: 'vault-123',
+    positions: [
+      {
+        asset_type: 'BTC',
+        quantity: '500.0',
+        as_of: new Date(Date.now() - 10 * 60 * 1000).toISOString(), // 10 min ago — fresh
+      },
+      {
+        asset_type: 'ETH',
+        quantity: '2000.0',
+        as_of: new Date(Date.now() - 67 * 60 * 1000).toISOString(), // 67 min ago — stale
+      },
+    ],
+  },
+};
 
 export const custodiansHandlers = [
   // ── GET /api/custodians ────────────────────────────────────────────────────
@@ -58,4 +80,21 @@ export const custodiansHandlers = [
     mockCustodians = [...mockCustodians, newLink];
     return HttpResponse.json(newLink, { status: 201 });
   }),
+
+  // ── GET /api/custodians/:id/inventory ──────────────────────────────────────
+  http.get('/api/custodians/:custodian_link_id/inventory', async ({ params }) => {
+    await delay(20);
+    const id = params.custodian_link_id as string;
+    const link = mockCustodians.find((c) => c.custodian_link_id === id);
+    if (!link) return mockError('not_found', 'Custodian link not found', 404);
+
+    const data = MOCK_INVENTORY[id] ?? {
+      custodian_link_id: id,
+      account_ref: link.account_ref,
+      positions: [],
+    };
+    return HttpResponse.json(data, { status: 200 });
+  }),
 ];
+
+export { STALE_THRESHOLD_MS };
