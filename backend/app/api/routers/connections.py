@@ -38,6 +38,8 @@ def _to_response(result) -> ConnectionResponse:
         connection_id=result.id,
         supplier_id=result.supplier_id,
         agent_id=result.agent_id,
+        supplier_name=result.supplier_name,
+        agent_name=result.agent_name,
         status=result.status,
         created_at=result.created_at,
         activated_at=result.activated_at,

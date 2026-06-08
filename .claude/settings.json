@@ -11,7 +11,10 @@
       "Bash(git -C /Users/sidyseck/github/lendrail-1 status --short)",
       "Bash(python -m pytest tests/test_inventory_scope.py -v --tb=short)",
       "Bash(python3 -m pytest --version)",
-      "Bash(uv --version)"
+      "Bash(uv --version)",
+      "Bash(xargs ls)",
+      "Bash(python -m pytest backend/tests/test_connections.py -x -q)",
+      "Bash(python3 -m pytest backend/tests/test_connections.py -x -q)"
     ]
   }
 }

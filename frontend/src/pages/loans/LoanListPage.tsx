@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { listLoans } from '@/api/loanApi';
+import { useAuth } from '@/auth/AuthContext';
+import { BookLoanStrip } from '@/components/loans/BookLoanStrip';
 import { LoanStateBadge } from '@/components/loans/LoanStateBadge';
 import type { Loan, LoanState } from '@/types/loan';
 
@@ -19,10 +21,24 @@ function formatDate(value: string | null): string {
 }
 
 export function LoanListPage() {
+  const { role } = useAuth();
   const [filter, setFilter] = useState<LoanState | ''>('');
   const [loans, setLoans] = useState<Loan[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const loadLoans = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const rows = await listLoans(filter || undefined);
+      setLoans(rows);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load loans.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [filter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,6 +83,8 @@ export function LoanListPage() {
           ))}
         </div>
       </div>
+
+      {role === 'agent' && <BookLoanStrip onBooked={loadLoans} />}
 
       {isLoading && <p className="text-sm text-gray-500">Loading loans...</p>}
       {!isLoading && error && (

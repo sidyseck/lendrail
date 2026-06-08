@@ -1,6 +1,18 @@
 import { delay, http, HttpResponse } from 'msw';
 import { mockError } from '../helpers';
-import type { ApprovedBorrower, BorrowerCreateRequest } from '@/types/borrower';
+import type { ApprovedBorrower, BorrowerCreateRequest, BorrowerDetail } from '@/types/borrower';
+
+let borrowers: BorrowerDetail[] = [
+  {
+    id: 'borrower-001',
+    invited_by: 'org-002',
+    name: 'Blue River Trading',
+    jurisdiction: 'Delaware, USA',
+    contact_email: 'ops@blueriver.example',
+    status: 'active',
+    created_at: '2026-06-08T00:00:00Z',
+  },
+];
 
 let approvedBorrowersByConnection: Record<string, ApprovedBorrower[]> = {
   'conn-002': [
@@ -15,6 +27,17 @@ let approvedBorrowersByConnection: Record<string, ApprovedBorrower[]> = {
 };
 
 export function resetMockBorrowers(): void {
+  borrowers = [
+    {
+      id: 'borrower-001',
+      invited_by: 'org-002',
+      name: 'Blue River Trading',
+      jurisdiction: 'Delaware, USA',
+      contact_email: 'ops@blueriver.example',
+      status: 'active',
+      created_at: '2026-06-08T00:00:00Z',
+    },
+  ];
   approvedBorrowersByConnection = {
     'conn-002': [
       {
@@ -29,6 +52,11 @@ export function resetMockBorrowers(): void {
 }
 
 export const borrowerHandlers = [
+  http.get('/api/borrowers', async () => {
+    await delay(20);
+    return HttpResponse.json({ borrowers });
+  }),
+
   http.get('/api/connections/:connection_id/approved-borrowers', async ({ params }) => {
     await delay(20);
     const connectionId = params.connection_id as string;
@@ -46,13 +74,27 @@ export const borrowerHandlers = [
     }
 
     const borrowerId = `borrower-${Date.now()}`;
+    const createdAt = new Date().toISOString();
+    borrowers = [
+      ...borrowers,
+      {
+        id: borrowerId,
+        invited_by: 'org-002',
+        name: body.name,
+        jurisdiction: body.jurisdiction,
+        contact_email: body.contact_email,
+        status: 'active',
+        created_at: createdAt,
+      },
+    ];
+
     if (body.connection_id) {
       const nextBorrower: ApprovedBorrower = {
         borrower_id: borrowerId,
         name: body.name,
         jurisdiction: body.jurisdiction,
         status: 'active',
-        approved_at: new Date().toISOString(),
+        approved_at: createdAt,
       };
       approvedBorrowersByConnection[body.connection_id] = [
         ...(approvedBorrowersByConnection[body.connection_id] ?? []),

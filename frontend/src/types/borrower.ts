@@ -22,3 +22,17 @@ export interface BorrowerCreateResponse {
   status: 'active';
   approved_connection_id: string | null;
 }
+
+export interface BorrowerDetail {
+  id: string;
+  invited_by: string;
+  name: string;
+  jurisdiction: string;
+  contact_email: string;
+  status: string;
+  created_at: string;
+}
+
+export interface BorrowerListResponse {
+  borrowers: BorrowerDetail[];
+}

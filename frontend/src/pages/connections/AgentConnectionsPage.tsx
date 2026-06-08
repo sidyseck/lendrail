@@ -110,7 +110,7 @@ export function AgentConnectionsPage() {
           <thead>
             <tr className="border-b border-gray-200">
               <th className="py-2 pr-4 text-left font-medium text-gray-600">
-                Supplier ID
+                Supplier
               </th>
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Status</th>
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Created</th>
@@ -121,8 +121,8 @@ export function AgentConnectionsPage() {
           <tbody>
             {connections.map((conn) => (
               <tr key={conn.connection_id} className="border-b border-gray-100">
-                <td className="py-3 pr-4 font-mono text-xs text-gray-700">
-                  <div>{conn.supplier_id.slice(0, 8)}…</div>
+                <td className="py-3 pr-4 text-gray-700">
+                  <div>{conn.supplier_name || conn.supplier_id.slice(0, 8) + '…'}</div>
                   {conn.status === 'active' && (
                     <div className="mt-1 font-sans">
                       <EffectiveAvailableRow connectionId={conn.connection_id} />

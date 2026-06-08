@@ -4,14 +4,21 @@ import { delay, http, HttpResponse } from 'msw';
 import { mockError } from '../helpers';
 import type { Connection, TerminateResponse, InviteUnknownAgentResponse } from '@/types/connection';
 
-const SUPPLIER_ORG_ID = 'org-001';
-const AGENT_ORG_ID    = 'org-002';
+const SUPPLIER_ORG_ID   = 'org-001';
+const AGENT_ORG_ID      = 'org-002';
+const SUPPLIER_ORG_NAME = 'Acme Capital';
+const AGENT_ORG_NAMES: Record<string, string> = {
+  'org-002': 'Beta Trading LLC',
+  'org-003': 'Gamma Fund',
+};
 
 const INITIAL_CONNECTIONS: Connection[] = [
   {
     connection_id: 'conn-001',
     supplier_id:   SUPPLIER_ORG_ID,
+    supplier_name: SUPPLIER_ORG_NAME,
     agent_id:      AGENT_ORG_ID,
+    agent_name:    AGENT_ORG_NAMES[AGENT_ORG_ID],
     status:        'pending',
     created_at:    '2026-06-08T00:00:00Z',
     activated_at:  null,
@@ -20,7 +27,9 @@ const INITIAL_CONNECTIONS: Connection[] = [
   {
     connection_id: 'conn-002',
     supplier_id:   SUPPLIER_ORG_ID,
+    supplier_name: SUPPLIER_ORG_NAME,
     agent_id:      'org-003',
+    agent_name:    AGENT_ORG_NAMES['org-003'],
     status:        'active',
     created_at:    '2026-06-01T00:00:00Z',
     activated_at:  '2026-06-02T00:00:00Z',
@@ -94,10 +103,13 @@ export const connectionsHandlers = [
       return mockError('validation_error', 'Provide either agent_org_id or agent_email', 422);
     }
 
+    const agentId = body.agent_org_id ?? 'org-unknown';
     const newConn: Connection = {
       connection_id: `conn-${Date.now()}`,
       supplier_id:   SUPPLIER_ORG_ID,
-      agent_id:      body.agent_org_id ?? 'org-unknown',
+      supplier_name: SUPPLIER_ORG_NAME,
+      agent_id:      agentId,
+      agent_name:    AGENT_ORG_NAMES[agentId] ?? agentId,
       status:        'pending',
       created_at:    new Date().toISOString(),
       activated_at:  null,

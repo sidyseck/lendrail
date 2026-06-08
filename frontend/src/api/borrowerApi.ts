@@ -4,6 +4,8 @@ import type {
   ApprovedBorrowerListResponse,
   BorrowerCreateRequest,
   BorrowerCreateResponse,
+  BorrowerDetail,
+  BorrowerListResponse,
 } from '@/types/borrower';
 
 const API_BASE =
@@ -54,4 +56,16 @@ export async function createBorrower(body: BorrowerCreateRequest): Promise<Borro
     throw new Error(parseErrorMessage(errBody, 'Failed to create borrower.'));
   }
   return (await response.json()) as BorrowerCreateResponse;
+}
+
+export async function listBorrowers(): Promise<BorrowerDetail[]> {
+  const response = await fetch(`${API_BASE}/borrowers`, {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    const errBody: unknown = await response.json().catch(() => null);
+    throw new Error(parseErrorMessage(errBody, 'Failed to load borrowers.'));
+  }
+  const data = (await response.json()) as BorrowerListResponse;
+  return data.borrowers;
 }

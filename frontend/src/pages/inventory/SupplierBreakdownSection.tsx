@@ -73,7 +73,7 @@ export function SupplierBreakdownSection({ breakdown, isLoading, highlightedConn
                     </td>
                     <td className="py-3 text-right">
                       <Link
-                        to={`/dashboard/book-loan?connection_id=${encodeURIComponent(row.connection_id)}&asset_type=${encodeURIComponent(row.asset_type)}`}
+                        to={`/dashboard/loans?connection_id=${encodeURIComponent(row.connection_id)}&asset_type=${encodeURIComponent(row.asset_type)}`}
                         className="rounded bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700"
                       >
                         Book Loan

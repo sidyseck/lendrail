@@ -36,6 +36,8 @@ class ConnectionResult:
     id: uuid.UUID
     supplier_id: uuid.UUID
     agent_id: uuid.UUID
+    supplier_name: str
+    agent_name: str
     status: str
     created_at: str         # ISO-8601
     activated_at: str | None
@@ -71,11 +73,18 @@ class InventoryScopeResult:
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-def _to_result(c, pending_agreement: bool = False) -> ConnectionResult:
+def _to_result(
+    c,
+    supplier_name: str = "",
+    agent_name: str = "",
+    pending_agreement: bool = False,
+) -> ConnectionResult:
     return ConnectionResult(
         id=c.id,
         supplier_id=c.supplier_id,
         agent_id=c.agent_id,
+        supplier_name=supplier_name,
+        agent_name=agent_name,
         status=c.status,
         created_at=c.created_at.isoformat(),
         activated_at=c.activated_at.isoformat() if c.activated_at else None,
@@ -332,8 +341,22 @@ class ConnectionService:
                 raise Forbidden("Caller has no associated organization")
             connections = await self.connections.list_for_org(caller.org_id)
 
+        org_ids = {c.supplier_id for c in connections} | {c.agent_id for c in connections}
+        org_names: dict[uuid.UUID, str] = {}
+        for oid in org_ids:
+            org = await self.orgs.get_or_none(oid)
+            if org is not None:
+                org_names[oid] = org.name
+
         return ConnectionListResult(
-            connections=[_to_result(c) for c in connections]
+            connections=[
+                _to_result(
+                    c,
+                    supplier_name=org_names.get(c.supplier_id, ""),
+                    agent_name=org_names.get(c.agent_id, ""),
+                )
+                for c in connections
+            ]
         )
 
     async def get_detail(
@@ -347,7 +370,13 @@ class ConnectionService:
             if caller.org_id not in (connection.supplier_id, connection.agent_id):
                 raise Forbidden("Your organization is not a party to this connection")
 
-        return _to_result(connection)
+        supplier_org = await self.orgs.get_or_none(connection.supplier_id)
+        agent_org = await self.orgs.get_or_none(connection.agent_id)
+        return _to_result(
+            connection,
+            supplier_name=supplier_org.name if supplier_org else "",
+            agent_name=agent_org.name if agent_org else "",
+        )
 
     # ── F-061 — inventory scope ──────────────────────────────────────────────
 

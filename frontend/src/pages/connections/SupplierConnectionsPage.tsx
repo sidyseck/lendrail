@@ -633,7 +633,7 @@ export function SupplierConnectionsPage() {
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="border-b border-gray-200">
-              <th className="py-2 pr-4 text-left font-medium text-gray-600">Agent ID</th>
+              <th className="py-2 pr-4 text-left font-medium text-gray-600">Agent</th>
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Status</th>
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Created</th>
               <th className="py-2 pr-4 text-left font-medium text-gray-600">Agreement</th>
@@ -643,8 +643,8 @@ export function SupplierConnectionsPage() {
           <tbody>
             {connections.map((conn) => (
               <tr key={conn.connection_id} className="border-b border-gray-100">
-                <td className="py-3 pr-4 font-mono text-xs text-gray-700">
-                  {conn.agent_id.slice(0, 8)}…
+                <td className="py-3 pr-4 text-gray-700">
+                  {conn.agent_name || conn.agent_id.slice(0, 8) + '…'}
                 </td>
                 <td className="py-3 pr-4">
                   <StatusBadge status={conn.status} />

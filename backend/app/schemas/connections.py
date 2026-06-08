@@ -44,6 +44,8 @@ class ConnectionResponse(BaseModel):
     connection_id: UUID
     supplier_id: UUID
     agent_id: UUID
+    supplier_name: str = ""
+    agent_name: str = ""
     status: str
     created_at: str                  # ISO-8601
     activated_at: str | None         # ISO-8601 or null

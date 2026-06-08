@@ -4,6 +4,8 @@ export interface Connection {
   connection_id: string;          // UUID
   supplier_id: string;            // UUID
   agent_id: string;               // UUID
+  supplier_name: string;
+  agent_name: string;
   status: ConnectionStatus;
   created_at: string;             // ISO-8601
   activated_at: string | null;    // ISO-8601 or null
