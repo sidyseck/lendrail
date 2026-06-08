@@ -4,6 +4,7 @@
 // show an "Updated X min ago" chip and a subtle yellow background.
 
 import type { SupplierBreakdownRow } from '@/types/inventory';
+import { Link } from 'react-router-dom';
 
 interface Props {
   breakdown: SupplierBreakdownRow[];
@@ -46,6 +47,7 @@ export function SupplierBreakdownSection({ breakdown, isLoading, highlightedConn
                 <th className="py-2 pr-4 text-left font-medium text-gray-600">Supplier</th>
                 <th className="py-2 pr-4 text-left font-medium text-gray-600">Asset type</th>
                 <th className="py-2 text-left font-medium text-gray-600">Available</th>
+                <th className="py-2 text-right font-medium text-gray-600">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -68,6 +70,14 @@ export function SupplierBreakdownSection({ breakdown, isLoading, highlightedConn
                           Updated {relativeTime(highlightAt)}
                         </span>
                       )}
+                    </td>
+                    <td className="py-3 text-right">
+                      <Link
+                        to={`/dashboard/book-loan?connection_id=${encodeURIComponent(row.connection_id)}&asset_type=${encodeURIComponent(row.asset_type)}`}
+                        className="rounded bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700"
+                      >
+                        Book Loan
+                      </Link>
                     </td>
                   </tr>
                 );

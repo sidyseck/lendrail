@@ -13,6 +13,7 @@ import { AgreementHistoryPage } from './pages/agreements/AgreementHistoryPage';
 import { CustodiansPage } from './pages/CustodiansPage';
 import { LoanListPage } from './pages/loans/LoanListPage';
 import { LoanDetailPage } from './pages/loans/LoanDetailPage';
+import { BookLoanPage } from './pages/loans/BookLoanPage';
 import { SupplierInventoryPage } from './pages/inventory/SupplierInventoryPage';
 import { AgentAvailableInventoryPage } from './pages/inventory/AgentAvailableInventoryPage';
 
@@ -45,6 +46,7 @@ export default function App() {
             {/* M4: loan lifecycle sub-routes */}
             <Route path="loans" element={<LoanListPage />} />
             <Route path="loans/:loanId" element={<LoanDetailPage />} />
+            <Route path="book-loan" element={<BookLoanPage />} />
             {/* Supplier-only custodian management */}
             <Route path="custodians" element={<CustodiansPage />} />
             {/* F-062: Supplier inventory management */}

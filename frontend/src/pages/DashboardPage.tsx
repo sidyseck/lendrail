@@ -11,6 +11,7 @@ export function DashboardPage() {
   const onCustodians = location.pathname.startsWith('/dashboard/custodians');
   const onInventory = location.pathname.startsWith('/dashboard/inventory');
   const onAvailableInventory = location.pathname.startsWith('/dashboard/available-inventory');
+  const onBookLoan = location.pathname.startsWith('/dashboard/book-loan');
 
   const { badgeCount } = useAllocationNotifications(onAvailableInventory);
 
@@ -69,6 +70,14 @@ export function DashboardPage() {
                     {badgeCount > 9 ? '9+' : badgeCount}
                   </span>
                 )}
+              </Link>
+            )}
+            {role === 'agent' && (
+              <Link
+                to="/dashboard/book-loan"
+                className={`text-sm ${onBookLoan ? 'font-semibold text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}
+              >
+                Book Loan
               </Link>
             )}
             {role && (
