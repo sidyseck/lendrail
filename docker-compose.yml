@@ -29,9 +29,6 @@ services:
     build: ./backend
     command: >
       sh -c "
-        until pg_isready -h postgres -U lendrail -d lendrail; do
-          echo 'waiting for postgres...'; sleep 2;
-        done &&
         alembic upgrade head &&
         uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
       "
