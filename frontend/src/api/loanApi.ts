@@ -1,5 +1,12 @@
 import { getToken } from '@/auth/tokenStore';
-import type { CollateralSubstitutionRequest, Loan, LoanListResponse, LoanState } from '@/types/loan';
+import type {
+  CollateralSubstitutionRequest,
+  Loan,
+  LoanBookingRequest,
+  LoanCreateResponse,
+  LoanListResponse,
+  LoanState,
+} from '@/types/loan';
 
 const API_BASE =
   typeof window !== 'undefined' ? `${window.location.origin}/api` : '/api';
@@ -51,6 +58,19 @@ export async function listLoans(state?: LoanState): Promise<Loan[]> {
 
 export async function getLoan(loanId: string): Promise<Loan> {
   return requestLoan(`/loans/${loanId}`, undefined, 'Failed to load loan.');
+}
+
+export async function bookLoan(body: LoanBookingRequest): Promise<LoanCreateResponse> {
+  const response = await fetch(`${API_BASE}/loans`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const errBody: unknown = await response.json().catch(() => null);
+    throw new Error(parseErrorMessage(errBody, 'Failed to book loan.'));
+  }
+  return (await response.json()) as LoanCreateResponse;
 }
 
 export async function recallLoan(loanId: string): Promise<Loan> {
