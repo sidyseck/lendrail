@@ -1,0 +1,34 @@
+// src/types/connection.ts — shared across supplier, agent, and admin pages
+
+export interface Connection {
+  connection_id: string;          // UUID
+  supplier_id: string;            // UUID
+  agent_id: string;               // UUID
+  status: ConnectionStatus;
+  custodian_link_present: boolean;
+  created_at: string;             // ISO-8601
+  activated_at: string | null;    // ISO-8601 or null
+}
+
+export type ConnectionStatus =
+  | 'pending'
+  | 'accepted'
+  | 'active'
+  | 'suspended'
+  | 'terminated';
+
+// HTTP 202 response for unknown-agent invite
+export interface InviteUnknownAgentResponse {
+  message: string;
+  agent_email: string;
+}
+
+// HTTP 201 response for known-agent invite — same shape as ConnectionResponse
+// (connection_id, supplier_id, agent_id, status, custodian_link_present, created_at, activated_at)
+
+export interface TerminateResponse {
+  connection_id: string;
+  status: 'terminated';
+  flagged_loan_ids: string[];
+  message: string;
+}

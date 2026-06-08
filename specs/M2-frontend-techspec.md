@@ -1151,4 +1151,19 @@ Until the backend provides the updated `openapi.json`, the interim `as never` ca
 
 ---
 
-Status: Draft — awaiting tech-lead review
+Status: **Implemented — rev 2**
+
+---
+
+## §11 — Resolution Log (tech-lead review applied 2026-06-08)
+
+| Finding | Severity | Resolution |
+|---|---|---|
+| **BLOCKER 1 & 2** — apiClient base URL / path prefix inconsistency | BLOCKER | Resolved. Clarified in §3 and §3.3: `apiClient` baseUrl already includes `/api`, so hook and page calls use NO `/api` prefix. Implementation uses raw `fetch` with explicit `API_BASE` constant (computed from `window.location.origin + '/api'` or `/api` in Node) to avoid `openapi-fetch` typed-path limitations for unregistered M2 endpoints. MSW handlers all use `/api/connections/...` (full path at network level). |
+| **MAJOR 3** — Empty state missing | MAJOR | Resolved. Both `SupplierConnectionsPage` and `AgentConnectionsPage` render empty-state messages: "No connections yet. Invite an agent to get started." and "No pending invitations." Tests added: `shows empty state when no connections exist` in each test file. |
+| **MAJOR 4** — Admin role dead-end | MAJOR | Resolved. `AdminConnectionsPage` implemented as a read-only table showing all connections with no action buttons. `ConnectionsPage` dispatches `role === 'admin'` to `AdminConnectionsPage`. Satisfies F-026 AC "Admin JWT can call GET /connections and receives all connections." |
+| **MAJOR 5** — `refetch()` called unconditionally on error | MAJOR | Resolved. `handleSuspend` and `handleTerminate` gate `refetch()` on `result !== null` (matching the `handleAccept` pattern in AgentConnectionsPage). |
+| **MINOR D-4** — MSW state leakage | MINOR | Promoted to required. `resetMockConnections()` exported from `src/mocks/handlers/connections.ts`. Called in `beforeEach()` in both `SupplierConnectionsPage.test.tsx` and `AgentConnectionsPage.test.tsx`. |
+| **MINOR (finding 6)** — Missing negative test for Register Key button | MINOR | Resolved. Added `does not show "Register Custodian Key" for active or suspended connections` test. |
+| **D-1** — Nested route approach | Open | Confirmed: nested routes with `<Outlet />` implemented as specced. |
+| **D-6** — Admin UI | Closed | Implemented `AdminConnectionsPage` (read-only). |

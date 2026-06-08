@@ -1,7 +1,10 @@
+import { Outlet, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '@/auth/AuthContext';
 
 export function DashboardPage() {
   const { role, logout } = useAuth();
+  const location = useLocation();
+  const onConnections = location.pathname.startsWith('/dashboard/connections');
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -10,6 +13,12 @@ export function DashboardPage() {
         <div className="flex items-center justify-between">
           <span className="text-lg font-semibold text-gray-900">LendRail</span>
           <div className="flex items-center gap-4">
+            <Link
+              to="/dashboard/connections"
+              className={`text-sm ${onConnections ? 'font-semibold text-gray-900' : 'text-gray-500 hover:text-gray-900'}`}
+            >
+              Connections
+            </Link>
             {role && (
               <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium capitalize text-gray-600">
                 {role}
@@ -25,11 +34,9 @@ export function DashboardPage() {
         </div>
       </nav>
 
-      {/* Content placeholder — feature pages added in M1 */}
-      <main className="flex items-center justify-center p-12">
-        <p className="text-sm text-gray-400">
-          Dashboard — feature pages coming in M1
-        </p>
+      {/* Child routes render here via Outlet */}
+      <main className="p-6">
+        <Outlet />
       </main>
     </div>
   );

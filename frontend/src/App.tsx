@@ -5,13 +5,14 @@ import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { SupplierRegisterPage } from './pages/SupplierRegisterPage';
 import { AgentRegisterPage } from './pages/AgentRegisterPage';
+import { ConnectionsPage } from './pages/connections/ConnectionsPage';
 
 export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
         <Routes>
-          {/* Public routes — no ProtectedRoute wrapper */}
+          {/* Public routes */}
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register/supplier" element={<SupplierRegisterPage />} />
           <Route path="/register/agent" element={<AgentRegisterPage />} />
@@ -24,7 +25,10 @@ export default function App() {
                 <DashboardPage />
               </ProtectedRoute>
             }
-          />
+          >
+            {/* M2: connections sub-route */}
+            <Route path="connections" element={<ConnectionsPage />} />
+          </Route>
 
           {/* Default redirect */}
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
