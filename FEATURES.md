@@ -343,14 +343,25 @@
 
 ---
 
-### F-018 — Borrower invite and account creation API endpoint
+### F-018 — Borrower creation and optional invite API endpoint
 **Milestone:** M1
 **Depends on:** F-017, F-005, F-006
 **Actor(s):** Agent
 
-**What it does:** Implements `POST /borrowers/invite` (requires agent JWT). The agent provides `email`, `name`, `jurisdiction`. The platform creates a `Borrower` row with `status=invited`, linked to the calling agent's org, and fires a notification (console log in MVP) that would carry the invite link.
+**What it does:** Implements two agent-only borrower creation paths:
+
+- `POST /borrowers` creates an agent-managed borrower record directly. The agent provides `contact_email`, `name`, `jurisdiction`, and may optionally provide `connection_id`. The platform creates a `Borrower` row with `status=active`, linked to the calling agent's org. If `connection_id` is provided, the platform also adds the borrower to that supplier connection's approved-borrower list, making the borrower visible to the supplier and immediately eligible for loan booking once all other booking guards pass.
+- `POST /borrowers/invite` remains available when the agent wants a borrower-facing invite path. It creates a `Borrower` row with `status=invited`, linked to the calling agent's org, and fires a notification (console log in MVP) that would carry the invite link.
+
+`GET /borrowers` lists borrowers managed by the calling agent. `GET /borrowers/{id}` returns a borrower record to the managing agent.
 
 **Acceptance criteria:**
+- [ ] `POST /borrowers` with a valid agent JWT and required fields returns HTTP 201 with `{ "borrower_id": "...", "status": "active" }`.
+- [ ] `POST /borrowers` with `connection_id` for an active connection owned by the calling agent returns HTTP 201 and adds the borrower to `connection_approved_borrowers`.
+- [ ] `POST /borrowers` with `connection_id` for another agent's connection returns HTTP 403.
+- [ ] `POST /borrowers` with `connection_id` for a non-active connection returns HTTP 409 with code `"connection_not_active"`.
+- [ ] Supplier can see borrowers linked to its connection through `GET /connections/{id}/approved-borrowers`.
+- [ ] `GET /borrowers` returns only borrowers managed by the calling agent.
 - [ ] `POST /borrowers/invite` with a valid agent JWT and required fields returns HTTP 201 with `{ "borrower_id": "..." }`.
 - [ ] Calling with a supplier JWT returns HTTP 403.
 - [ ] The new borrower row has `invited_by` = the calling agent's `org_id`.
@@ -792,6 +803,35 @@ The supplier can update the allocation at any time. If the custodian balance dro
 
 ---
 
+### F-064 — Agent borrower creation and loan booking screen
+**Milestone:** M4 (extension)
+**Depends on:** F-018, F-034, F-035, F-038, F-061, F-063
+**Actor(s):** Agent
+
+**What it does:** React page for the agent to create/select a borrower and book a loan against inventory published by a supplier. The screen starts from the agent's available inventory view and carries forward the selected supplier connection, asset type, and effective available quantity.
+
+**Primary workflow:**
+- Agent opens `/dashboard/book-loan` from an available-inventory supplier row.
+- Agent selects an existing approved borrower for that supplier connection or creates a new borrower inline with `POST /borrowers`.
+- If a new borrower is created, the request includes `connection_id` so the borrower is added to that supplier connection's approved list and becomes visible to the supplier.
+- Agent enters quantity, rate, term, maturity if fixed, collateral type, collateral quantity, and collateral value.
+- Submitting calls `POST /loans`.
+
+**Acceptance criteria:**
+- [ ] The page is accessible to agents only.
+- [ ] The page can be opened from an available-inventory row with `connection_id` and `asset_type` preselected.
+- [ ] Existing borrowers are loaded from `GET /connections/{id}/approved-borrowers`.
+- [ ] Creating a borrower inline calls `POST /borrowers` with `connection_id` and adds the new borrower to the borrower selector without a borrower invite step.
+- [ ] Supplier can see the newly linked borrower through `GET /connections/{id}/approved-borrowers`.
+- [ ] The quantity input shows the effective available quantity for the selected supplier connection and asset.
+- [ ] Submitting within the remaining published allocation calls `POST /loans` and routes to the loan detail page.
+- [ ] API validation errors from booking are surfaced inline, including `"borrower_not_approved"`, `"no_inventory_published"`, `"exceeds_published_inventory"`, `"asset_not_in_scope"`, `"collateral_not_eligible"`, `"ltv_exceeded"`, `"no_active_agreement"`, and `"agreement_not_fully_confirmed"`.
+- [ ] TypeScript compiles with zero errors.
+
+**Out of scope for this feature:** Borrower-facing onboarding; loan matching; automatic custodian settlement initiation at booking.
+
+---
+
 ## M4 — Loan Lifecycle
 
 ---
@@ -977,7 +1017,7 @@ The supplier can update the allocation at any time. If the custodian balance dro
 - [ ] Loan detail page shows all fields from `GET /loans/{id}`, including `ltv_as_of` timestamp.
 - [ ] TypeScript compiles with zero errors.
 
-**Out of scope for this feature:** Real-time updates (polling or websocket); partial recall UI.
+**Out of scope for this feature:** Real-time updates (polling or websocket); partial recall UI; new loan booking UI (covered by F-064).
 
 ---
 
@@ -1315,6 +1355,6 @@ The supplier can update the allocation at any time. If the custodian balance dro
 | M1 — Onboarding | F-011, F-012, F-013, F-014, F-015, F-016, F-017, F-018, F-019, F-058 |
 | M2 — Connection | F-020, F-021, F-022, F-023, F-024, F-025, F-026, F-027, F-061, F-062, F-063 |
 | M3 — Agreement | F-028, F-029, F-030, F-031, F-032 |
-| M4 — Loan lifecycle | F-033, F-034, F-035, F-036, F-037, F-038, F-039, F-040, F-041, F-042 |
+| M4 — Loan lifecycle | F-033, F-034, F-035, F-036, F-037, F-038, F-039, F-040, F-041, F-042, F-064 |
 | M5 — Risk monitoring | F-043, F-044, F-045, F-046, F-047, F-048 |
 | M6 — Accrual & Reporting | F-049, F-050, F-051, F-052, F-053, F-054, F-055, F-056, F-057, F-059 |

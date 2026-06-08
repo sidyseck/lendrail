@@ -28,7 +28,7 @@ Four parties interact with the platform in the MVP. Roles and responsibilities a
 |---|---|---|---|
 | **Supplier** | Beneficial owner, lender, BTC holder | Earn clean BTC or USD-equivalent yield on idle inventory without taking additional market risk | Publishes lendable inventory, sets program parameters, monitors loans, issues instructions |
 | **Agent Lender** | Agent | Win mandates by offering a transparent, accountable lending program that suppliers trust | Books loans, onboards borrowers, reconciles through platform, executes supplier instructions |
-| **Borrower** | Counterparty | Access BTC liquidity for trading, hedging, or market-making | Invited by agent. Account created in MVP but borrower-facing flows are deferred. Entity tracked independently for Phase 1 multi-agent readiness. |
+| **Borrower** | Counterparty | Access BTC liquidity for trading, hedging, or market-making | Created and managed by agent. Borrower-facing flows are deferred. Entity tracked independently for Phase 1 multi-agent readiness. |
 | **Custodian** | Sub-custodian | Provide verified asset and collateral data to the platform | Not a user. Integrated via REST API. Provides inventory feed (supplier assets) and collateral feed (borrower collateral). Does not receive platform instructions in MVP. |
 
 ---
@@ -133,10 +133,10 @@ The agent lender is invited by the supplier or applies directly. They are a part
 Borrowers are not active platform participants in MVP. However, the account creation flow is built now so that: (a) the agent can track borrowers in the system, and (b) when the platform opens to borrowers in a later phase, the same entity record exists and can connect to multiple agents.
 
 **What it includes:**
-- Agent sends invite to borrower by email
-- Borrower completes minimal profile: entity name, jurisdiction, primary contact
-- Account is created and linked to the inviting agent
-- Borrower is visible in the platform to the agent and supplier (read-only view)
+- Agent creates a borrower record with entity name, jurisdiction, and primary contact
+- Optional invite path remains available when the agent wants borrower-facing activation later
+- Account is created and linked to the managing agent
+- Borrower can be linked to a supplier-agent connection so the supplier can see the borrower in a read-only approved-borrower view
 
 **Why in MVP:** Enables loan booking (loans must reference a borrower entity). Sets up the data model for Phase 1 where borrowers face multiple agents and need a single identity.
 

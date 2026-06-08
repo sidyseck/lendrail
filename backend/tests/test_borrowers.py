@@ -229,6 +229,52 @@ async def test_borrower_default_status_invited(db_session: AsyncSession) -> None
 # ── F-018: Borrower invite/get tests ──────────────────────────────────────────
 
 @pytest.mark.asyncio
+async def test_create_borrower_201(client: AsyncClient, agent_headers: dict) -> None:
+    headers = {"Authorization": agent_headers["Authorization"]}
+    resp = await client.post("/borrowers", json=_invite_payload(), headers=headers)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["status"] == "active"
+    assert data["approved_connection_id"] is None
+    uuid.UUID(data["borrower_id"])
+
+
+@pytest.mark.asyncio
+async def test_create_borrower_sets_active_status(
+    client: AsyncClient, agent_headers: dict, db_session: AsyncSession
+) -> None:
+    headers = {"Authorization": agent_headers["Authorization"]}
+    resp = await client.post("/borrowers", json=_invite_payload(), headers=headers)
+    assert resp.status_code == 201
+    borrower_id = resp.json()["borrower_id"]
+
+    result = await db_session.execute(
+        text("SELECT status FROM borrowers WHERE id = :id"),
+        {"id": borrower_id},
+    )
+    assert result.fetchone().status == "active"
+
+
+@pytest.mark.asyncio
+async def test_list_borrowers_for_agent(client: AsyncClient, agent_headers: dict) -> None:
+    headers = {"Authorization": agent_headers["Authorization"]}
+    resp = await client.post("/borrowers", json=_invite_payload(name="Managed Borrower"), headers=headers)
+    assert resp.status_code == 201
+
+    resp = await client.get("/borrowers", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [b["name"] for b in data["borrowers"]] == ["Managed Borrower"]
+
+
+@pytest.mark.asyncio
+async def test_create_borrower_with_supplier_jwt_403(client: AsyncClient, supplier_headers: dict) -> None:
+    resp = await client.post("/borrowers", json=_invite_payload(), headers=supplier_headers)
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "forbidden"
+
+
+@pytest.mark.asyncio
 async def test_invite_borrower_201(client: AsyncClient, agent_headers: dict) -> None:
     headers = {"Authorization": agent_headers["Authorization"]}
     resp = await client.post("/borrowers/invite", json=_invite_payload(), headers=headers)

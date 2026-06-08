@@ -108,6 +108,8 @@ def get_borrower_service(session: SessionDep) -> BorrowerService:
     notifier = ConsoleNotificationAdapter(NotificationRepository(session))
     return BorrowerService(
         borrowers=BorrowerRepository(session),
+        connections=ConnectionRepository(session),
+        approved_borrowers=ApprovedBorrowerRepository(session),
         notifier=notifier,
     )
 

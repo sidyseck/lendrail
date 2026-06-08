@@ -178,6 +178,58 @@ async def test_approved_borrower_and_booking_flow(seeded_client: AsyncClient, m4
 
     resp = await seeded_client.post("/loans", json=booking, headers=m4_setup["agent"]["headers"])
     assert resp.status_code == 201, resp.text
+
+
+@pytest.mark.asyncio
+async def test_create_borrower_with_connection_enables_supplier_visibility_and_booking(
+    seeded_client: AsyncClient, m4_setup: dict
+) -> None:
+    resp = await seeded_client.post(
+        "/borrowers",
+        json={
+            "name": "Direct Borrower",
+            "jurisdiction": "Delaware, USA",
+            "contact_email": f"direct-borrower-{uuid.uuid4().hex[:8]}@example.com",
+            "connection_id": m4_setup["connection_id"],
+        },
+        headers=m4_setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
+    borrower_id = resp.json()["borrower_id"]
+    assert resp.json()["status"] == "active"
+    assert resp.json()["approved_connection_id"] == m4_setup["connection_id"]
+
+    resp = await seeded_client.get(
+        f"/connections/{m4_setup['connection_id']}/approved-borrowers",
+        headers=m4_setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    assert borrower_id in {borrower["borrower_id"] for borrower in resp.json()["borrowers"]}
+
+    resp = await seeded_client.put(
+        f"/connections/{m4_setup['connection_id']}/inventory-scope",
+        json={"scope": {"BTC": "100.0"}},
+        headers=m4_setup["supplier"]["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+
+    resp = await seeded_client.post(
+        "/loans",
+        json={
+            "connection_id": m4_setup["connection_id"],
+            "borrower_id": borrower_id,
+            "asset_type": "BTC",
+            "quantity": "0.50",
+            "rate_bps": 500,
+            "term_type": "open",
+            "maturity_date": None,
+            "collateral_type": "CASH_USD",
+            "collateral_quantity": "15000",
+            "collateral_value_usd": "15000",
+        },
+        headers=m4_setup["agent"]["headers"],
+    )
+    assert resp.status_code == 201, resp.text
     loan_id = resp.json()["loan_id"]
     assert resp.json()["state"] == "pending"
 
