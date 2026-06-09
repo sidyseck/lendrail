@@ -71,6 +71,18 @@ function isPos(s: string): boolean {
 function isCashType(t: string): boolean {
   return t.trim().toUpperCase() === CASH;
 }
+/** Parse a numeric string, optionally with k/m/b shorthand (e.g. "1.5m" → 1500000). Returns null for blank or invalid input. */
+function parseShorthand(s: string): number | null {
+  const t = s.trim();
+  if (t === '') return null;
+  const match = t.match(/^(-?[\d.]+)([kKmMbB]?)$/);
+  if (!match) return null;
+  const base = parseFloat(match[1]);
+  if (!Number.isFinite(base)) return null;
+  const suffix = match[2].toLowerCase();
+  const mult = suffix === 'k' ? 1_000 : suffix === 'm' ? 1_000_000 : suffix === 'b' ? 1_000_000_000 : 1;
+  return base * mult;
+}
 
 // Map backend F-035/F-064 error codes to the field they anchor to.
 const CODE_TO_FIELD: Record<string, FieldKey | 'top'> = {
@@ -473,6 +485,13 @@ export function BookLoanStrip({ onBooked }: Props) {
     setFieldErrors({});
     setIsBooking(true);
     try {
+      const qtyNum = parseShorthand(values.quantity);
+      const priceNum = parseShorthand(values.asset_price_usd);
+      const collValNum = parseShorthand(values.collateral_value_usd);
+      const quantityStr = qtyNum !== null ? String(qtyNum) : values.quantity;
+      const priceStr = priceNum !== null ? String(priceNum) : values.asset_price_usd;
+      const collQtyStr = values.collateral_quantity;
+      const collValStr = collValNum !== null ? String(collValNum) : values.collateral_value_usd;
       const payload: LoanBookingRequest = {
         connection_id: selected.connection_id,
         borrower_id: values.borrower_id,
