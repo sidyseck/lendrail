@@ -31,7 +31,7 @@ export function useAgentInventory(): UseAgentInventoryReturn {
 
   const activeConns = connections.filter((c) => c.status === 'active');
 
-  const fetchInventory = useCallback(async (connIds: { id: string; supplier_id: string }[]) => {
+  const fetchInventory = useCallback(async (connIds: { id: string; supplier_id: string; supplier_name: string }[]) => {
     if (connIds.length === 0) {
       setAggregated([]);
       setBreakdown([]);
@@ -54,6 +54,7 @@ export function useAgentInventory(): UseAgentInventoryReturn {
             allBreakdownRows.push({
               connection_id: conn.id,
               supplier_id: conn.supplier_id,
+              supplier_name: conn.supplier_name,
               asset_type: entry.asset_type,
               effective_available: entry.effective_available,
             });
@@ -78,7 +79,7 @@ export function useAgentInventory(): UseAgentInventoryReturn {
 
   useEffect(() => {
     if (isLoadingConnections || connectionsError) return;
-    void fetchInventory(activeConns.map((c) => ({ id: c.connection_id, supplier_id: c.supplier_id })));
+    void fetchInventory(activeConns.map((c) => ({ id: c.connection_id, supplier_id: c.supplier_id, supplier_name: c.supplier_name })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoadingConnections, connectionsError, activeConns.map((c) => c.connection_id).join(',')]);
 

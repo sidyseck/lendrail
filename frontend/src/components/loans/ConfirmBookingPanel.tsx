@@ -65,7 +65,10 @@ export function ConfirmBookingPanel({ summary, isBooking, onCancel, onConfirm }:
         </div>
         <div>
           <span className="font-medium">Economics</span>{' '}
-          {summary.rateBps ? `${summary.rateBps} bps` : '—'} ·{' '}
+          {summary.ratePct && Number.isFinite(Number(summary.ratePct))
+            ? `${summary.ratePct}% (${Math.round(Number(summary.ratePct) * 100)} bps)`
+            : '—'}{' '}
+          ·{' '}
           {summary.termType === 'fixed' ? `fixed @ ${summary.maturityDate || '—'}` : 'open term'}
         </div>
         {summary.warning && (

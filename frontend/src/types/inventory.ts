@@ -13,6 +13,7 @@ export interface AgentConnectionInventoryResponse {
 export interface SupplierBreakdownRow {
   connection_id: string;
   supplier_id: string;
+  supplier_name: string;
   asset_type: string;
   effective_available: string;
 }

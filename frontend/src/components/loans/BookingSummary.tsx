@@ -2,7 +2,7 @@ import { formatQty, formatUsd } from '@/lib/format';
 
 export interface BookingSummaryProps {
   borrowerName?: string;
-  supplierShort?: string;
+  supplierName?: string;
   assetType?: string;
   quantity?: string;
   loanValueUsd?: number;
@@ -14,10 +14,10 @@ export interface BookingSummaryProps {
   impliedLtv?: number;
   marginCallLtv?: string;
   liquidationLtv?: string;
-  rateBps?: string;
+  ratePct?: string;
   termType: 'open' | 'fixed';
   maturityDate?: string | null;
-  warning?: boolean; // divergence active
+  warning?: boolean;
 }
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -34,7 +34,7 @@ const CASH = 'CASH_USD';
 export function BookingSummary(props: BookingSummaryProps) {
   const {
     borrowerName,
-    supplierShort,
+    supplierName,
     assetType,
     quantity,
     loanValueUsd,
@@ -46,11 +46,13 @@ export function BookingSummary(props: BookingSummaryProps) {
     impliedLtv,
     marginCallLtv,
     liquidationLtv,
-    rateBps,
+    ratePct,
     termType,
     maturityDate,
     warning,
   } = props;
+
+  const rateBpsInt = ratePct && Number.isFinite(Number(ratePct)) ? Math.round(Number(ratePct) * 100) : null;
 
   const isCash = collateralType.toUpperCase() === CASH;
 
@@ -60,7 +62,7 @@ export function BookingSummary(props: BookingSummaryProps) {
       <dl className="mt-3 space-y-3">
         <Row label="Borrower">{borrowerName || '—'}</Row>
         <Row label="Supplier">
-          {supplierShort ? `${supplierShort} · ${assetType ?? '—'}` : '—'}
+          {supplierName ? `${supplierName} · ${assetType ?? '—'}` : '—'}
         </Row>
         <div className="border-t border-gray-200" />
         <Row label="Lending">
@@ -91,7 +93,8 @@ export function BookingSummary(props: BookingSummaryProps) {
           {liquidationLtv ? `${liquidationLtv}%` : '—'}
         </div>
         <div className="text-xs text-gray-500">
-          Rate / Term {rateBps ? `${rateBps} bps` : '—'} ·{' '}
+          Rate / Term{' '}
+          {ratePct && rateBpsInt !== null ? `${ratePct}% (${rateBpsInt} bps)` : '—'} ·{' '}
           {termType === 'fixed' ? `fixed @ ${maturityDate || '—'}` : 'open'}
         </div>
         {warning && (

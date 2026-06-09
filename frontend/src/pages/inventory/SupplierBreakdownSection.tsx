@@ -59,8 +59,8 @@ export function SupplierBreakdownSection({ breakdown, isLoading, highlightedConn
                     className={`border-b border-gray-100 ${highlightAt ? 'bg-yellow-50' : ''}`}
                     data-testid={`breakdown-row-${row.connection_id}-${row.asset_type}`}
                   >
-                    <td className="py-3 pr-4 font-mono text-xs text-gray-700">
-                      {row.supplier_id.slice(0, 8)}…
+                    <td className="py-3 pr-4 text-sm text-gray-700">
+                      {row.supplier_name}
                     </td>
                     <td className="py-3 pr-4 font-semibold text-gray-700">{row.asset_type}</td>
                     <td className="py-3 text-gray-700">

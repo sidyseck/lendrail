@@ -28,7 +28,7 @@ interface FormValues {
   booking_ltv_pct: string;
   margin_call_ltv_pct: string;
   liquidation_ltv_pct: string;
-  rate_bps: string;
+  rate_pct: string;
   term_type: TermType;
   maturity_date: string;
   collateral_type: string;
@@ -43,13 +43,15 @@ const EMPTY_FORM: FormValues = {
   booking_ltv_pct: '',
   margin_call_ltv_pct: '',
   liquidation_ltv_pct: '',
-  rate_bps: '',
+  rate_pct: '',
   term_type: 'open',
   maturity_date: '',
   collateral_type: 'CASH_USD',
   collateral_quantity: '',
   collateral_value_usd: '',
 };
+
+const ASSET_COLLATERAL_TYPES = ['USDC', 'USDT', 'BUIDL'] as const;
 
 const CASH = 'CASH_USD';
 const EPSILON = 1e-9;
@@ -140,22 +142,16 @@ export function BookLoanStrip({ onBooked }: Props) {
     () => rows.find((row) => `${row.connection_id}:${row.asset_type}` === selectedKey) ?? null,
     [rows, selectedKey],
   );
-  const selectedBorrower = borrowers.find((b) => b.borrower_id === values.borrower_id) ?? null;
+  function getCollateralAssetPrice(assetType: string): number {
+    const p = latestPrices.current[assetType];
+    return p !== undefined && p > 0 ? p : 1;
+  }
 
   // ── Derived values ──────────────────────────────────────────────────────
-  const parsedQty = parseShorthand(values.quantity);
-  const parsedPrice = parseShorthand(values.asset_price_usd);
-  const notional = parsedQty !== null && parsedPrice !== null ? parsedQty * parsedPrice : null;
-
-  const parsedCollateralValue = parseShorthand(values.collateral_value_usd);
-  const coverageRatio =
-    notional !== null && notional > 0 && parsedCollateralValue !== null
-      ? (parsedCollateralValue / notional) * 100
+  const rateBpsDisplay =
+    values.rate_pct.trim() !== '' && Number.isFinite(Number(values.rate_pct))
+      ? `= ${Math.round(Number(values.rate_pct) * 100)} bps`
       : null;
-
-  const ratePct = values.rate_bps ? (Number(values.rate_bps) / 100).toFixed(2) : null;
-
-  const summaryReady = !!(selected && selectedBorrower && parsedQty !== null && parsedPrice !== null);
 
   // ── URL sync ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -272,16 +268,25 @@ export function BookLoanStrip({ onBooked }: Props) {
   // ── Recalc engine (SPEC §3) — per-field handlers; the edited field is the
   // source of truth and is never its own recompute target. ────────────────────
 
+  function recomputeCollQty(next: FormValues): void {
+    if (isCashType(next.collateral_type)) {
+      next.collateral_quantity = next.collateral_value_usd;
+    } else if (isPos(next.collateral_value_usd)) {
+      const price = getCollateralAssetPrice(next.collateral_type);
+      const qty = num(next.collateral_value_usd) / price;
+      if (Number.isFinite(qty) && qty > 0) next.collateral_quantity = qty.toFixed(4);
+    }
+  }
+
   function setQuantity(v: string) {
     clearFeedback();
     setValues((c) => {
       const next: FormValues = { ...c, quantity: v };
-      // quantity -> collateral_value_usd
       if (isPos(v) && isPos(c.asset_price_usd) && isPos(c.booking_ltv_pct)) {
         const cv = num(v) * num(c.asset_price_usd) * (num(c.booking_ltv_pct) / 100);
         if (Number.isFinite(cv) && cv > 0) {
           next.collateral_value_usd = cv.toFixed(2);
-          if (isCashType(c.collateral_type)) next.collateral_quantity = next.collateral_value_usd;
+          recomputeCollQty(next);
           flashRecompute('collateral_value_usd');
         }
       }
@@ -297,7 +302,7 @@ export function BookLoanStrip({ onBooked }: Props) {
         const cv = num(c.quantity) * num(v) * (num(c.booking_ltv_pct) / 100);
         if (Number.isFinite(cv) && cv > 0) {
           next.collateral_value_usd = cv.toFixed(2);
-          if (isCashType(c.collateral_type)) next.collateral_quantity = next.collateral_value_usd;
+          recomputeCollQty(next);
           flashRecompute('collateral_value_usd');
         }
       }
@@ -313,7 +318,7 @@ export function BookLoanStrip({ onBooked }: Props) {
         const cv = num(c.quantity) * num(c.asset_price_usd) * (num(v) / 100);
         if (Number.isFinite(cv) && cv > 0) {
           next.collateral_value_usd = cv.toFixed(2);
-          if (isCashType(c.collateral_type)) next.collateral_quantity = next.collateral_value_usd;
+          recomputeCollQty(next);
           flashRecompute('collateral_value_usd');
         }
       }
@@ -325,9 +330,7 @@ export function BookLoanStrip({ onBooked }: Props) {
     clearFeedback();
     setValues((c) => {
       const next: FormValues = { ...c, collateral_value_usd: v };
-      // CASH: quantity is locked to the USD value.
-      if (isCashType(c.collateral_type)) next.collateral_quantity = v;
-      // collateral_value_usd -> implied booking_ltv_pct
+      recomputeCollQty(next);
       if (isPos(c.quantity) && isPos(c.asset_price_usd) && isPos(v)) {
         const denom = num(c.quantity) * num(c.asset_price_usd);
         if (denom > 0) {
@@ -345,16 +348,8 @@ export function BookLoanStrip({ onBooked }: Props) {
   function setCollateralType(v: string) {
     clearFeedback();
     setValues((c) => {
-      const wasCash = isCashType(c.collateral_type);
-      const nowCash = isCashType(v);
       const next: FormValues = { ...c, collateral_type: v };
-      if (!wasCash && nowCash) {
-        // non-CASH -> CASH: relock collateral_quantity to the USD value.
-        next.collateral_quantity = c.collateral_value_usd;
-      } else if (wasCash && !nowCash) {
-        // CASH -> non-CASH: unlock and clear; operator must re-enter.
-        next.collateral_quantity = '';
-      }
+      recomputeCollQty(next);
       return next;
     });
   }
@@ -405,7 +400,7 @@ export function BookLoanStrip({ onBooked }: Props) {
 
   const summary: BookingSummaryProps = {
     borrowerName,
-    supplierShort: selected ? `${selected.supplier_id.slice(0, 8)}…` : undefined,
+    supplierName: selected?.supplier_name,
     assetType: selected?.asset_type,
     quantity: values.quantity || undefined,
     loanValueUsd,
@@ -417,7 +412,7 @@ export function BookLoanStrip({ onBooked }: Props) {
     impliedLtv,
     marginCallLtv: values.margin_call_ltv_pct || undefined,
     liquidationLtv: values.liquidation_ltv_pct || undefined,
-    rateBps: values.rate_bps || undefined,
+    ratePct: values.rate_pct || undefined,
     termType: values.term_type,
     maturityDate: values.term_type === 'fixed' ? values.maturity_date : null,
     warning: warningActive,
@@ -434,12 +429,9 @@ export function BookLoanStrip({ onBooked }: Props) {
     if (!isPos(values.margin_call_ltv_pct)) errs.margin_call_ltv_pct = 'Enter a positive LTV.';
     if (!isPos(values.liquidation_ltv_pct)) errs.liquidation_ltv_pct = 'Enter a positive LTV.';
 
-    const rate = num(values.rate_bps);
-    if (values.rate_bps.trim() === '' || !Number.isFinite(rate) || rate < 0 || !Number.isInteger(rate)) {
-      errs.rate_bps = 'Enter rate in bps (integer ≥ 0).';
-    }
-    if (!isCash && !isPos(values.collateral_quantity)) {
-      errs.collateral_quantity = 'Enter a positive collateral quantity.';
+    const rate = Number(values.rate_pct);
+    if (values.rate_pct.trim() === '' || !Number.isFinite(rate) || rate < 0) {
+      errs.rate_pct = 'Enter rate in % (≥ 0).';
     }
     if (values.term_type === 'fixed' && !values.maturity_date) {
       errs.maturity_date = 'Maturity date is required for a fixed term.';
@@ -501,7 +493,7 @@ export function BookLoanStrip({ onBooked }: Props) {
         booking_ltv_pct: values.booking_ltv_pct,
         margin_call_ltv_pct: values.margin_call_ltv_pct,
         liquidation_ltv_pct: values.liquidation_ltv_pct,
-        rate_bps: Number(values.rate_bps),
+        rate_bps: Math.round(Number(values.rate_pct) * 100),
         term_type: values.term_type,
         maturity_date: values.term_type === 'fixed' ? values.maturity_date : null,
         collateral_type: values.collateral_type,
@@ -550,7 +542,7 @@ export function BookLoanStrip({ onBooked }: Props) {
     values.quantity !== '' ||
     values.borrower_id !== '' ||
     values.collateral_value_usd !== '' ||
-    values.rate_bps !== '';
+    values.rate_pct !== '';
 
   return (
     <section
@@ -604,10 +596,10 @@ export function BookLoanStrip({ onBooked }: Props) {
 
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
           {/* Form column */}
-          <div className={confirming ? 'space-y-4 opacity-60 pointer-events-none' : 'space-y-4'}>
+          <div className={confirming ? 'space-y-3 opacity-60 pointer-events-none' : 'space-y-3'}>
             {/* Counterparty */}
             <FieldGroup title="Counterparty">
-              <div className="grid gap-x-6 gap-y-4 lg:grid-cols-2">
+              <div className="grid gap-x-6 gap-y-3 lg:grid-cols-2">
                 <div>
                   <label
                     htmlFor="inventory-select"
@@ -619,13 +611,13 @@ export function BookLoanStrip({ onBooked }: Props) {
                     id="inventory-select"
                     value={selectedKey}
                     onChange={(e) => chooseInventory(e.target.value)}
-                    className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+                    className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
                   >
                     {rows.map((row) => {
                       const key = `${row.connection_id}:${row.asset_type}`;
                       return (
                         <option key={key} value={key}>
-                          {row.asset_type} · {row.effective_available} avail · {row.supplier_id.slice(0, 8)}…
+                          {row.asset_type} · {row.effective_available} avail · {row.supplier_name}
                         </option>
                       );
                     })}
@@ -651,7 +643,7 @@ export function BookLoanStrip({ onBooked }: Props) {
                     disabled={borrowersLoading}
                     aria-invalid={fieldErrors.borrower_id ? true : undefined}
                     aria-describedby={fieldErrors.borrower_id ? 'borrower-select-error' : undefined}
-                    className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:opacity-50"
+                    className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2 disabled:opacity-50"
                   >
                     <option value="">{borrowersLoading ? 'Loading…' : 'Select borrower'}</option>
                     {borrowers.map((b) => (
@@ -683,7 +675,7 @@ export function BookLoanStrip({ onBooked }: Props) {
 
             {/* Secured loan — primary calc cluster */}
             <FieldGroup title="Secured loan" variant="primary" warning={warningActive}>
-              <div className="grid gap-x-6 gap-y-4 lg:grid-cols-3">
+              <div className="grid gap-x-6 gap-y-3 lg:grid-cols-3">
                 <CalcField
                   id="field-quantity"
                   label="Quantity"
@@ -728,19 +720,45 @@ export function BookLoanStrip({ onBooked }: Props) {
                 />
               </div>
 
+              {/* Collateral type selector */}
+              <div className="flex items-center gap-3">
+                <span className="text-xs font-medium text-gray-600">Collateral</span>
+                <div className="flex overflow-hidden rounded border border-gray-300">
+                  <button
+                    type="button"
+                    onClick={() => setCollateralType(CASH)}
+                    className={`px-3 py-1 text-xs font-medium ${isCash ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Cash
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { if (isCash) setCollateralType('USDC'); }}
+                    className={`border-l border-gray-300 px-3 py-1 text-xs font-medium ${!isCash ? 'bg-gray-900 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+                  >
+                    Asset
+                  </button>
+                </div>
+                {!isCash && (
+                  <select
+                    value={values.collateral_type}
+                    onChange={(e) => setCollateralType(e.target.value)}
+                    aria-label="Collateral asset"
+                    className="h-7 rounded border border-gray-300 bg-white px-2 text-xs text-gray-900 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-gray-900"
+                  >
+                    {ASSET_COLLATERAL_TYPES.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                )}
+                {fieldErrors.collateral_type && (
+                  <span className="text-xs text-red-600">{fieldErrors.collateral_type}</span>
+                )}
+              </div>
+
               <div className="border-t border-gray-200" />
 
-              <div className={`grid gap-x-6 gap-y-4 ${isCash ? 'lg:grid-cols-2' : 'lg:grid-cols-3'}`}>
-                {!isCash && (
-                  <CalcField
-                    id="field-collateral-quantity"
-                    label="Collateral quantity"
-                    value={values.collateral_quantity}
-                    onChange={(v) => setField('collateral_quantity', v)}
-                    unit={values.collateral_type}
-                    error={fieldErrors.collateral_quantity}
-                  />
-                )}
+              <div className={`grid gap-x-6 gap-y-3 ${isCash ? 'lg:grid-cols-2' : 'lg:grid-cols-3'}`}>
                 <CalcField
                   id="field-collateral-value"
                   label="Collateral value USD"
@@ -750,36 +768,37 @@ export function BookLoanStrip({ onBooked }: Props) {
                   recomputed={recomputedField === 'collateral_value_usd'}
                   helper={
                     loanValueUsd !== undefined
-                      ? `Loan value ${formatUsd(loanValueUsd)}${
-                          isPos(values.booking_ltv_pct) ? ` · LTV ${values.booking_ltv_pct}%` : ''
-                        }`
-                      : isCash
-                        ? 'quantity locked to USD value'
-                        : '—'
+                      ? `Loan ${formatUsd(loanValueUsd)}${isPos(values.booking_ltv_pct) ? ` · LTV ${values.booking_ltv_pct}%` : ''}`
+                      : '—'
                   }
                 />
+                {!isCash && (
+                  <CalcField
+                    id="field-collateral-quantity"
+                    label={`Qty (${values.collateral_type})`}
+                    value={values.collateral_quantity}
+                    onChange={(v) => setField('collateral_quantity', v)}
+                    readOnly
+                    unit={values.collateral_type}
+                  />
+                )}
                 <div>
                   <p className="block text-xs font-medium text-gray-600 mb-1">Coverage</p>
-                  <p className="flex h-10 items-center text-sm text-gray-900 tabular-nums">
+                  <p className="flex h-9 items-center text-sm text-gray-900 tabular-nums">
                     {coverage !== undefined ? (
-                      <span>
-                        {coverage.toFixed(2)}× · {(coverage * 100).toFixed(0)}% of loan value
-                      </span>
+                      <span>{coverage.toFixed(2)}× · {(coverage * 100).toFixed(0)}%</span>
                     ) : (
                       '—'
                     )}
                   </p>
                   {coverage !== undefined && (
-                    <p className="mt-1 text-xs">
+                    <p className="mt-0.5 text-xs">
                       {coverage >= 1 ? (
                         <span className="text-green-700">secured ✓</span>
                       ) : (
                         <span className="text-amber-700">under-collateralized</span>
                       )}
                     </p>
-                  )}
-                  {isCash && (
-                    <p className="mt-1 text-xs text-gray-500">quantity locked to USD value</p>
                   )}
                 </div>
               </div>
@@ -796,7 +815,7 @@ export function BookLoanStrip({ onBooked }: Props) {
 
             {/* Risk thresholds — secondary */}
             <FieldGroup title="Risk thresholds">
-              <div className="grid gap-x-6 gap-y-4 lg:grid-cols-2">
+              <div className="grid gap-x-6 gap-y-3 lg:grid-cols-2">
                 <CalcField
                   id="field-margin-call-ltv"
                   label="Margin call LTV %"
@@ -817,15 +836,17 @@ export function BookLoanStrip({ onBooked }: Props) {
               </p>
             </FieldGroup>
 
-            {/* Economics & collateral — secondary */}
-            <FieldGroup title="Economics & collateral">
-              <div className="grid gap-x-6 gap-y-4 lg:grid-cols-4">
+            {/* Economics — secondary */}
+            <FieldGroup title="Economics">
+              <div className={`grid gap-x-6 gap-y-3 ${values.term_type === 'fixed' ? 'lg:grid-cols-3' : 'lg:grid-cols-2'}`}>
                 <CalcField
-                  id="field-rate-bps"
-                  label="Rate bps"
-                  value={values.rate_bps}
-                  onChange={(v) => setField('rate_bps', v)}
-                  error={fieldErrors.rate_bps}
+                  id="field-rate-pct"
+                  label="Rate %"
+                  value={values.rate_pct}
+                  onChange={(v) => setField('rate_pct', v)}
+                  unit="%"
+                  helper={rateBpsDisplay ?? '—'}
+                  error={fieldErrors.rate_pct}
                 />
                 <div>
                   <label htmlFor="field-term" className="block text-xs font-medium text-gray-600 mb-1">
@@ -835,7 +856,7 @@ export function BookLoanStrip({ onBooked }: Props) {
                     id="field-term"
                     value={values.term_type}
                     onChange={(e) => setField('term_type', e.target.value as TermType)}
-                    className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+                    className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
                   >
                     <option value="open">Open</option>
                     <option value="fixed">Fixed</option>
@@ -855,36 +876,13 @@ export function BookLoanStrip({ onBooked }: Props) {
                       value={values.maturity_date}
                       onChange={(e) => setField('maturity_date', e.target.value)}
                       aria-invalid={fieldErrors.maturity_date ? true : undefined}
-                      className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
+                      className="flex h-9 w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
                     />
                     {fieldErrors.maturity_date && (
                       <p className="mt-1 text-xs text-red-600">{fieldErrors.maturity_date}</p>
                     )}
                   </div>
                 )}
-                <div>
-                  <label
-                    htmlFor="field-collateral-type"
-                    className="block text-xs font-medium text-gray-600 mb-1"
-                  >
-                    Collateral type
-                  </label>
-                  <input
-                    id="field-collateral-type"
-                    value={values.collateral_type}
-                    onChange={(e) => setCollateralType(e.target.value)}
-                    aria-invalid={fieldErrors.collateral_type ? true : undefined}
-                    aria-describedby={
-                      fieldErrors.collateral_type ? 'field-collateral-type-error' : undefined
-                    }
-                    className="flex h-10 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-900 focus-visible:ring-offset-2"
-                  />
-                  {fieldErrors.collateral_type && (
-                    <p id="field-collateral-type-error" className="mt-1 text-xs text-red-600">
-                      {fieldErrors.collateral_type}
-                    </p>
-                  )}
-                </div>
               </div>
             </FieldGroup>
 
