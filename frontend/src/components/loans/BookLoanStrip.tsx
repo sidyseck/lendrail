@@ -283,7 +283,8 @@ export function BookLoanStrip({ onBooked }: Props) {
     setValues((c) => {
       const next: FormValues = { ...c, quantity: v };
       if (isPos(v) && isPos(c.asset_price_usd) && isPos(c.booking_ltv_pct)) {
-        const cv = num(v) * num(c.asset_price_usd) * (num(c.booking_ltv_pct) / 100);
+        const loanVal = num(v) * num(c.asset_price_usd);
+        const cv = loanVal / (num(c.booking_ltv_pct) / 100);
         if (Number.isFinite(cv) && cv > 0) {
           next.collateral_value_usd = cv.toFixed(2);
           recomputeCollQty(next);
@@ -299,7 +300,8 @@ export function BookLoanStrip({ onBooked }: Props) {
     setValues((c) => {
       const next: FormValues = { ...c, asset_price_usd: v };
       if (isPos(c.quantity) && isPos(v) && isPos(c.booking_ltv_pct)) {
-        const cv = num(c.quantity) * num(v) * (num(c.booking_ltv_pct) / 100);
+        const loanVal = num(c.quantity) * num(v);
+        const cv = loanVal / (num(c.booking_ltv_pct) / 100);
         if (Number.isFinite(cv) && cv > 0) {
           next.collateral_value_usd = cv.toFixed(2);
           recomputeCollQty(next);
@@ -315,7 +317,8 @@ export function BookLoanStrip({ onBooked }: Props) {
     setValues((c) => {
       const next: FormValues = { ...c, booking_ltv_pct: v };
       if (isPos(c.quantity) && isPos(c.asset_price_usd) && isPos(v)) {
-        const cv = num(c.quantity) * num(c.asset_price_usd) * (num(v) / 100);
+        const loanVal = num(c.quantity) * num(c.asset_price_usd);
+        const cv = loanVal / (num(v) / 100);
         if (Number.isFinite(cv) && cv > 0) {
           next.collateral_value_usd = cv.toFixed(2);
           recomputeCollQty(next);
@@ -332,9 +335,11 @@ export function BookLoanStrip({ onBooked }: Props) {
       const next: FormValues = { ...c, collateral_value_usd: v };
       recomputeCollQty(next);
       if (isPos(c.quantity) && isPos(c.asset_price_usd) && isPos(v)) {
-        const denom = num(c.quantity) * num(c.asset_price_usd);
-        if (denom > 0) {
-          const ltv = (num(v) / denom) * 100;
+        const loanVal = num(c.quantity) * num(c.asset_price_usd);
+        const collVal = num(v);
+        if (collVal > 0) {
+          // LTV = loan / collateral
+          const ltv = (loanVal / collVal) * 100;
           if (Number.isFinite(ltv) && ltv > 0) {
             next.booking_ltv_pct = ltv.toFixed(2);
             flashRecompute('booking_ltv_pct');
@@ -368,8 +373,8 @@ export function BookLoanStrip({ onBooked }: Props) {
     ? num(values.collateral_value_usd)
     : undefined;
   const impliedLtv =
-    loanValueUsd !== undefined && loanValueUsd > 0 && collateralValueNum !== undefined
-      ? (collateralValueNum / loanValueUsd) * 100
+    loanValueUsd !== undefined && loanValueUsd > 0 && collateralValueNum !== undefined && collateralValueNum > 0
+      ? (loanValueUsd / collateralValueNum) * 100
       : undefined;
   const coverage =
     loanValueUsd !== undefined && loanValueUsd > 0 && collateralValueNum !== undefined
@@ -437,21 +442,16 @@ export function BookLoanStrip({ onBooked }: Props) {
       errs.maturity_date = 'Maturity date is required for a fixed term.';
     }
 
-    // Threshold ordering 0 < booking < margin_call < liquidation — anchor to the
-    // first offending threshold.
-    if (
-      isPos(values.booking_ltv_pct) &&
-      isPos(values.margin_call_ltv_pct) &&
-      isPos(values.liquidation_ltv_pct)
-    ) {
+    // Threshold ordering: booking < margin call < liquidation — two independent checks.
+    if (isPos(values.booking_ltv_pct) && isPos(values.margin_call_ltv_pct)) {
       const b = num(values.booking_ltv_pct);
       const m = num(values.margin_call_ltv_pct);
+      if (b >= m) errs.margin_call_ltv_pct = `Must exceed booking LTV (${b.toFixed(2)}%).`;
+    }
+    if (isPos(values.margin_call_ltv_pct) && isPos(values.liquidation_ltv_pct)) {
+      const m = num(values.margin_call_ltv_pct);
       const l = num(values.liquidation_ltv_pct);
-      const ordered = 0 < b && b < m && m < l;
-      if (!ordered) {
-        const anchor: FieldKey = b >= m ? 'margin_call_ltv_pct' : 'liquidation_ltv_pct';
-        errs[anchor] = 'Thresholds must increase: booking < margin call < liquidation.';
-      }
+      if (m >= l) errs.liquidation_ltv_pct = `Must exceed margin call LTV (${m.toFixed(2)}%).`;
     }
     return errs;
   }
@@ -832,7 +832,7 @@ export function BookLoanStrip({ onBooked }: Props) {
                 />
               </div>
               <p className="text-xs text-gray-400">
-                must increase: booking &lt; margin call &lt; liquidation
+                booking &lt; margin call &lt; liquidation
               </p>
             </FieldGroup>
 
