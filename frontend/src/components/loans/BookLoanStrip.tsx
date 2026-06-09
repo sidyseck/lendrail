@@ -128,13 +128,28 @@ export function BookLoanStrip({ onBooked }: Props) {
     () => rows.find((row) => `${row.connection_id}:${row.asset_type}` === selectedKey) ?? null,
     [rows, selectedKey],
   );
+  const selectedBorrower = borrowers.find((b) => b.borrower_id === values.borrower_id) ?? null;
 
+  // ── Derived values ──────────────────────────────────────────────────────
+  const parsedQty = parseShorthand(values.quantity);
+  const parsedPrice = parseShorthand(values.asset_price_usd);
+  const notional = parsedQty !== null && parsedPrice !== null ? parsedQty * parsedPrice : null;
+
+  const parsedCollateralValue = parseShorthand(values.collateral_value_usd);
+  const coverageRatio =
+    notional !== null && notional > 0 && parsedCollateralValue !== null
+      ? (parsedCollateralValue / notional) * 100
+      : null;
+
+  const ratePct = values.rate_bps ? (Number(values.rate_bps) / 100).toFixed(2) : null;
+
+  const summaryReady = !!(selected && selectedBorrower && parsedQty !== null && parsedPrice !== null);
+
+  // ── URL sync ────────────────────────────────────────────────────────────
   useEffect(() => {
     const connectionId = searchParams.get('connection_id');
     const assetType = searchParams.get('asset_type');
-    if (connectionId && assetType) {
-      setSelectedKey(`${connectionId}:${assetType}`);
-    }
+    if (connectionId && assetType) setSelectedKey(`${connectionId}:${assetType}`);
   }, [searchParams]);
 
   useEffect(() => {
@@ -161,12 +176,10 @@ export function BookLoanStrip({ onBooked }: Props) {
       setBorrowers([]);
       return;
     }
-
     let cancelled = false;
     setBorrowersLoading(true);
     setError(null);
-    setValues((current) => ({ ...current, borrower_id: '' }));
-
+    setValues((cur) => ({ ...cur, borrower_id: '' }));
     listApprovedBorrowers(selected.connection_id)
       .then((next) => {
         if (!cancelled) setBorrowers(next);
@@ -464,8 +477,8 @@ export function BookLoanStrip({ onBooked }: Props) {
         connection_id: selected.connection_id,
         borrower_id: values.borrower_id,
         asset_type: selected.asset_type,
-        quantity: values.quantity,
-        asset_price_usd: values.asset_price_usd,
+        quantity: quantityStr,
+        asset_price_usd: priceStr,
         booking_ltv_pct: values.booking_ltv_pct,
         margin_call_ltv_pct: values.margin_call_ltv_pct,
         liquidation_ltv_pct: values.liquidation_ltv_pct,
@@ -473,8 +486,8 @@ export function BookLoanStrip({ onBooked }: Props) {
         term_type: values.term_type,
         maturity_date: values.term_type === 'fixed' ? values.maturity_date : null,
         collateral_type: values.collateral_type,
-        collateral_quantity: values.collateral_quantity,
-        collateral_value_usd: values.collateral_value_usd,
+        collateral_quantity: collQtyStr,
+        collateral_value_usd: collValStr,
       };
       await bookLoan(payload);
       setValues(EMPTY_FORM);
@@ -501,6 +514,7 @@ export function BookLoanStrip({ onBooked }: Props) {
     }
   }
 
+  // ── Loading / empty states ───────────────────────────────────────────────
   if (inventory.isLoading) {
     return <p className="text-sm text-gray-500">Loading booking inventory...</p>;
   }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { listLoans } from '@/api/loanApi';
 import { useAuth } from '@/auth/AuthContext';
 import { BookLoanStrip } from '@/components/loans/BookLoanStrip';
@@ -17,12 +17,13 @@ const FILTERS: Array<{ label: string; value: LoanState | '' }> = [
 ];
 
 function formatDate(value: string | null): string {
-  if (!value) return '-';
-  return new Date(value).toLocaleDateString();
+  if (!value) return '—';
+  return new Date(value).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 export function LoanListPage() {
   const { role } = useAuth();
+  const navigate = useNavigate();
   const [filter, setFilter] = useState<LoanState | ''>('');
   const [loans, setLoans] = useState<Loan[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -52,16 +53,17 @@ export function LoanListPage() {
           <h1 className="text-2xl font-semibold text-gray-900">Loans</h1>
           <p className="mt-1 text-sm text-gray-500">Lifecycle status across connected lending programs.</p>
         </div>
-        <div className="flex flex-wrap gap-2" role="tablist" aria-label="Loan state filter">
+
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Filter by state">
           {FILTERS.map((item) => (
             <button
               key={item.value || 'all'}
               type="button"
               onClick={() => setFilter(item.value)}
-              className={`rounded border px-3 py-1.5 text-sm ${
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
                 filter === item.value
-                  ? 'border-gray-900 bg-gray-900 text-white'
-                  : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+                  ? 'bg-gray-900 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
               {item.label}
@@ -72,18 +74,26 @@ export function LoanListPage() {
 
       {role === 'agent' && <BookLoanStrip onBooked={loadLoans} />}
 
-      {isLoading && <p className="text-sm text-gray-500">Loading loans...</p>}
+      {isLoading && (
+        <div className="space-y-2">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="h-12 animate-pulse rounded bg-gray-100" />
+          ))}
+        </div>
+      )}
+
       {!isLoading && error && (
-        <p role="alert" className="text-sm text-red-600">
+        <p role="alert" className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
         </p>
       )}
+
       {!isLoading && !error && loans.length === 0 && (
-        <p className="text-sm text-gray-500">No loans match the selected state.</p>
+        <p className="py-8 text-center text-sm text-gray-400">No loans match the selected state.</p>
       )}
 
       {!isLoading && !error && loans.length > 0 && (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto rounded-lg border border-gray-200">
           <table className="w-full border-collapse text-sm">
             <thead>
               <tr className="border-b border-gray-200">
@@ -95,7 +105,7 @@ export function LoanListPage() {
                 <th className="py-2 text-left font-medium text-gray-600">Detail</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-gray-100">
               {loans.map((loan) => (
                 <tr key={loan.loan_id} className="border-b border-gray-100">
                   <td className="py-3 pr-4 text-gray-900">{loan.borrower_name}</td>
@@ -108,18 +118,17 @@ export function LoanListPage() {
                   <td className="py-3 pr-4 text-right tabular-nums text-gray-700">
                     {loan.current_ltv_pct ? `${Number(loan.current_ltv_pct).toFixed(2)}%` : '-'}
                   </td>
-                  <td className="py-3 pr-4">
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-600">
+                    {loan.rate_bps} bps
+                    <span className="ml-1 text-gray-400 text-xs">({(loan.rate_bps / 100).toFixed(2)}%)</span>
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-gray-700">
+                    {loan.current_ltv_pct ? `${Number(loan.current_ltv_pct).toFixed(2)}%` : '—'}
+                  </td>
+                  <td className="px-4 py-3">
                     <LoanStateBadge state={loan.state} />
                   </td>
-                  <td className="py-3 pr-4 text-gray-600">{formatDate(loan.booked_at)}</td>
-                  <td className="py-3">
-                    <Link
-                      to={`/dashboard/loans/${loan.loan_id}`}
-                      className="text-sm font-medium text-blue-700 hover:text-blue-900"
-                    >
-                      View
-                    </Link>
-                  </td>
+                  <td className="px-4 py-3 text-gray-500">{formatDate(loan.booked_at)}</td>
                 </tr>
               ))}
             </tbody>
