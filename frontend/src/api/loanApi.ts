@@ -33,6 +33,20 @@ function parseErrorMessage(body: unknown, fallback: string): string {
   return fallback;
 }
 
+function parseErrorCode(body: unknown): string | null {
+  if (
+    body !== null &&
+    typeof body === 'object' &&
+    'error' in body &&
+    typeof (body as { error: unknown }).error === 'object' &&
+    (body as { error: unknown }).error !== null
+  ) {
+    const err = (body as { error: { code?: unknown } }).error;
+    if (typeof err.code === 'string') return err.code;
+  }
+  return null;
+}
+
 async function requestLoan(path: string, init?: RequestInit, fallback = 'Loan request failed.'): Promise<Loan> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -68,7 +82,11 @@ export async function bookLoan(body: LoanBookingRequest): Promise<LoanCreateResp
   });
   if (!response.ok) {
     const errBody: unknown = await response.json().catch(() => null);
-    throw new Error(parseErrorMessage(errBody, 'Failed to book loan.'));
+    const code = parseErrorCode(errBody);
+    const message = parseErrorMessage(errBody, 'Failed to book loan.');
+    const err = new Error(message);
+    (err as Error & { code?: string }).code = code ?? undefined;
+    throw err;
   }
   return (await response.json()) as LoanCreateResponse;
 }

@@ -5,6 +5,7 @@ import { useAuth } from '@/auth/AuthContext';
 import { BookLoanStrip } from '@/components/loans/BookLoanStrip';
 import { LoanStateBadge } from '@/components/loans/LoanStateBadge';
 import type { Loan, LoanState } from '@/types/loan';
+import { formatQty, formatUsd } from '@/lib/format';
 
 const FILTERS: Array<{ label: string; value: LoanState | '' }> = [
   { label: 'All', value: '' },
@@ -46,8 +47,8 @@ export function LoanListPage() {
   }, [loadLoans]);
 
   return (
-    <div>
-      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Loans</h1>
           <p className="mt-1 text-sm text-gray-500">Lifecycle status across connected lending programs.</p>
@@ -95,27 +96,27 @@ export function LoanListPage() {
         <div className="overflow-x-auto rounded-lg border border-gray-200">
           <table className="w-full border-collapse text-sm">
             <thead>
-              <tr className="border-b border-gray-200 bg-gray-50">
-                <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500">Borrower</th>
-                <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500">Asset</th>
-                <th className="px-4 py-2.5 text-right text-xs font-medium text-gray-500">Quantity</th>
-                <th className="px-4 py-2.5 text-right text-xs font-medium text-gray-500">Rate</th>
-                <th className="px-4 py-2.5 text-right text-xs font-medium text-gray-500">LTV</th>
-                <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500">State</th>
-                <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500">Booked</th>
+              <tr className="border-b border-gray-200">
+                <th className="py-2 pr-4 text-left font-medium text-gray-600">Borrower</th>
+                <th className="py-2 pr-4 text-right font-medium text-gray-600">Asset / Quantity</th>
+                <th className="py-2 pr-4 text-right font-medium text-gray-600">LTV</th>
+                <th className="py-2 pr-4 text-left font-medium text-gray-600">State</th>
+                <th className="py-2 pr-4 text-left font-medium text-gray-600">Booked</th>
+                <th className="py-2 text-left font-medium text-gray-600">Detail</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loans.map((loan) => (
-                <tr
-                  key={loan.loan_id}
-                  onClick={() => void navigate(`/dashboard/loans/${loan.loan_id}`)}
-                  className="cursor-pointer hover:bg-gray-50"
-                >
-                  <td className="px-4 py-3 font-medium text-gray-900">{loan.borrower_name}</td>
-                  <td className="px-4 py-3 text-gray-700">{loan.asset_type}</td>
-                  <td className="px-4 py-3 text-right tabular-nums text-gray-700">
-                    {Number(loan.quantity).toLocaleString('en-US')}
+                <tr key={loan.loan_id} className="border-b border-gray-100">
+                  <td className="py-3 pr-4 text-gray-900">{loan.borrower_name}</td>
+                  <td className="py-3 pr-4 text-right tabular-nums">
+                    <div className="text-gray-900">
+                      {formatQty(loan.quantity)} {loan.asset_type}
+                    </div>
+                    <div className="text-xs text-gray-500">coll {formatUsd(Number(loan.collateral_value_usd))}</div>
+                  </td>
+                  <td className="py-3 pr-4 text-right tabular-nums text-gray-700">
+                    {loan.current_ltv_pct ? `${Number(loan.current_ltv_pct).toFixed(2)}%` : '-'}
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums text-gray-600">
                     {loan.rate_bps} bps
